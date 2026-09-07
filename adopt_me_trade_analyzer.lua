@@ -1,40 +1,42 @@
 repeat task.wait() until game:IsLoaded()
 
 --============================================================
--- ADOPT ME TRADE ANALYZER V11.6.0
+-- ADOPT ME TRADE ANALYZER V11.6.1
+-- BASELESS EXACT
 --
--- FULL BUILD
+-- IMPORTANT:
+-- NO CROSS-VARIANT FALLBACKS.
 --
--- FIXES:
---   Dark Choccybunny detection
---   Pilot Gull M / missing exact variant fields
---   duplicate AMVGG RSC objects are MERGED
---   exact variant first, safe same-stage fallback second
+-- NP  -> npRegularValue
+-- F   -> fValue
+-- R   -> rValue
+-- FR  -> regularValue
 --
--- AMVGG CATEGORIES:
---   Pets
---   Eggs
---   Pet Wear
---   Strollers
---   Food
---   Vehicles
---   Toys
---   Gifts
---   Stickers
---   Houses
+-- N   -> npNeonValue
+-- NF  -> nfValue
+-- NR  -> nrValue
+-- NFR -> neonValue
 --
--- CORE:
---   ClientData
---   ItemDB
---   18 slots
---   live trade
---   exact pet variants
---   values
---   totals
---   WIN / FAIR / LOSE
---   Values search
---   X hide
---   AM reopen
+-- M   -> npMegaValue
+-- MF  -> mfValue
+-- MR  -> mrValue
+-- MFR -> megaValue
+--
+-- If exact field is nil:
+-- V ? / NO EXACT BASELESS VALUE
+--
+-- FEATURES:
+-- 18 slots
+-- ClientData
+-- ItemDB names
+-- all AMVGG categories
+-- duplicate RSC merge
+-- exact variants
+-- totals
+-- WIN / FAIR / LOSE
+-- Values search
+-- X hide
+-- AM reopen
 --============================================================
 
 --============================================================
@@ -64,7 +66,7 @@ local ENV =
     and getgenv()
     or _G
 
-print("[AM V11.6.0] BOOT")
+print("[AM V11.6.1] BOOT")
 
 --============================================================
 -- GUI PARENT
@@ -87,7 +89,7 @@ end
 -- REMOVE OLD GUI
 --============================================================
 
-local OLD = {
+local OLD_GUI_NAMES = {
 
     "AdoptMeTradeAnalyzerV11",
     "AdoptMeTradeAnalyzerV111",
@@ -99,30 +101,32 @@ local OLD = {
     "AdoptMeTradeAnalyzerV1152",
     "AdoptMeTradeAnalyzerV1153",
     "AdoptMeTradeAnalyzerV1160",
+    "AdoptMeTradeAnalyzerV1161",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
+    "AM_ANALYZER_BOOT_V1161",
 }
 
-for _, name in ipairs(OLD) do
+for _, name in ipairs(OLD_GUI_NAMES) do
 
-    local object =
+    local old =
         GuiParent:FindFirstChild(name)
 
-    if object then
-        object:Destroy()
+    if old then
+        old:Destroy()
     end
 end
 
 --============================================================
--- BOOT WINDOW
+-- BOOT GUI
 --============================================================
 
 local BootGui =
     Instance.new("ScreenGui")
 
 BootGui.Name =
-    "AM_ANALYZER_BOOT_V1160"
+    "AM_ANALYZER_BOOT_V1161"
 
 BootGui.ResetOnSpawn =
     false
@@ -163,16 +167,32 @@ BootFrame.BorderSizePixel =
 BootFrame.Parent =
     BootGui
 
-local bc =
+local BootCorner =
     Instance.new("UICorner")
 
-bc.CornerRadius =
+BootCorner.CornerRadius =
     UDim.new(
         0,
         10
     )
 
-bc.Parent =
+BootCorner.Parent =
+    BootFrame
+
+local BootStroke =
+    Instance.new("UIStroke")
+
+BootStroke.Color =
+    Color3.fromRGB(
+        70,
+        90,
+        130
+    )
+
+BootStroke.Transparency =
+    0.25
+
+BootStroke.Parent =
     BootFrame
 
 local BootText =
@@ -212,66 +232,68 @@ BootText.TextColor3 =
     )
 
 BootText.Text =
-    "ADOPT ME ANALYZER V11.6.0\nBOOT..."
+    "ADOPT ME ANALYZER V11.6.1\nBOOT..."
 
 BootText.Parent =
     BootFrame
 
-local function boot(
+local function setBoot(
     step,
     text,
-    bad
+    isError
 )
 
     BootText.Text =
-        "ADOPT ME ANALYZER V11.6.0\n"
+        "ADOPT ME ANALYZER V11.6.1\n"
         .. tostring(step)
         .. "  "
         .. tostring(text)
 
-    BootText.TextColor3 =
-        bad
-        and Color3.fromRGB(
-            255,
-            100,
-            110
-        )
-        or Color3.fromRGB(
-            240,
-            243,
-            250
-        )
+    if isError then
+
+        BootText.TextColor3 =
+            Color3.fromRGB(
+                255,
+                100,
+                110
+            )
+
+    else
+
+        BootText.TextColor3 =
+            Color3.fromRGB(
+                240,
+                243,
+                250
+            )
+    end
 
     print(
-        "[AM V11.6.0]",
+        "[AM V11.6.1]",
         step,
         text
     )
 end
 
-local function trace(err)
+local function safeTraceback(err)
 
     local result =
         tostring(err)
 
     if
         debug
-        and type(
-            debug.traceback
-        ) == "function"
+        and type(debug.traceback) == "function"
     then
 
-        local ok, value =
-            pcall(
-                debug.traceback
-            )
+        local ok, trace =
+            pcall(debug.traceback)
 
         if ok then
 
             result =
                 result
                 .. "\n"
-                .. tostring(value)
+                .. tostring(trace)
         end
     end
 
@@ -282,9 +304,9 @@ end
 -- ADOPT ME MODULES
 --============================================================
 
-boot(
+setBoot(
     "1/8",
-    "Loading Adopt Me modules"
+    "LOADING ADOPT ME MODULES"
 )
 
 local Fsys
@@ -304,6 +326,16 @@ do
                         )
                     )
 
+                assert(
+                    type(Fsys) == "table",
+                    "Fsys is not table"
+                )
+
+                assert(
+                    type(Fsys.load) == "function",
+                    "Fsys.load missing"
+                )
+
                 ClientData =
                     Fsys.load(
                         "ClientData"
@@ -315,23 +347,23 @@ do
                     )
 
                 assert(
-                    type(ClientData)
-                    == "table"
+                    type(ClientData) == "table",
+                    "ClientData invalid"
                 )
 
                 assert(
-                    type(ItemDB)
-                    == "table"
+                    type(ItemDB) == "table",
+                    "ItemDB invalid"
                 )
 
             end,
 
-            trace
+            safeTraceback
         )
 
     if not ok then
 
-        boot(
+        setBoot(
             "ERROR",
             err,
             true
@@ -341,9 +373,9 @@ do
     end
 end
 
-boot(
+setBoot(
     "2/8",
-    "ClientData + ItemDB OK"
+    "CLIENT DATA + ITEM DB OK"
 )
 
 --============================================================
@@ -455,7 +487,7 @@ local C = {
 -- UI HELPERS
 --============================================================
 
-local function corner(
+local function addCorner(
     object,
     radius
 )
@@ -475,7 +507,7 @@ local function corner(
     return x
 end
 
-local function stroke(
+local function addStroke(
     object,
     transparency
 )
@@ -502,7 +534,7 @@ local function stroke(
     return x
 end
 
-local function label(
+local function makeLabel(
     parent,
     text,
     size,
@@ -550,7 +582,7 @@ local function label(
     return x
 end
 
-local function button(
+local function makeButton(
     parent,
     text,
     size,
@@ -587,7 +619,7 @@ local function button(
     x.Parent =
         parent
 
-    corner(
+    addCorner(
         x,
         7
     )
@@ -596,10 +628,10 @@ local function button(
 end
 
 --============================================================
--- NUMBER
+-- NUMBER HELPERS
 --============================================================
 
-local function numeric(value)
+local function toNumber(value)
 
     if type(value) == "number" then
         return value
@@ -612,21 +644,21 @@ local function numeric(value)
     return nil
 end
 
-local function numText(value)
+local function numberText(value)
 
     if type(value) ~= "number" then
         return "?"
     end
 
-    if math.abs(value) < 0.0000001 then
+    if math.abs(value) < 0.00000001 then
         return "0"
     end
 
-    local s
+    local text
 
     if math.abs(value) >= 100 then
 
-        s =
+        text =
             string.format(
                 "%.2f",
                 value
@@ -634,7 +666,7 @@ local function numText(value)
 
     elseif math.abs(value) >= 1 then
 
-        s =
+        text =
             string.format(
                 "%.4f",
                 value
@@ -642,26 +674,26 @@ local function numText(value)
 
     else
 
-        s =
+        text =
             string.format(
                 "%.6f",
                 value
             )
     end
 
-    s =
-        s:gsub(
+    text =
+        text:gsub(
             "0+$",
             ""
         )
 
-    s =
-        s:gsub(
+    text =
+        text:gsub(
             "%.$",
             ""
         )
 
-    return s
+    return text
 end
 
 --============================================================
@@ -699,9 +731,9 @@ local function normalize(text)
     return text
 end
 
-local function aliases(text)
+local function buildAliases(text)
 
-    local results =
+    local result =
         {}
 
     local function add(value)
@@ -710,44 +742,46 @@ local function aliases(text)
             normalize(value)
 
         if value ~= "" then
-            results[value] = true
+
+            result[value] =
+                true
         end
     end
 
-    add(text)
-
-    local x =
+    local original =
         tostring(
             text or ""
         )
 
+    add(original)
+
     add(
-        x:gsub(
+        original:gsub(
             "%b()",
             ""
         )
     )
 
-    -- common spelling compatibility
+    -- Adopt Me / AMVGG spelling compatibility
     add(
-        x:gsub(
+        original:gsub(
             "Chocobunny",
             "Choccybunny"
         )
     )
 
     add(
-        x:gsub(
+        original:gsub(
             "Choccybunny",
             "Chocobunny"
         )
     )
 
-    return results
+    return result
 end
 
 --============================================================
--- ADOPT ME ITEM INFO
+-- ADOPT ME ITEMS
 --============================================================
 
 local CATEGORY_DISPLAY = {
@@ -780,40 +814,42 @@ local CATEGORY_DISPLAY = {
         "HOUSE",
 }
 
-local function dbEntry(item)
+local function getDBEntry(item)
 
     if type(item) ~= "table" then
         return nil
     end
 
-    local category =
+    local categoryDB =
         ItemDB[
             item.category
         ]
 
-    if type(category) ~= "table" then
+    if type(categoryDB) ~= "table" then
         return nil
     end
 
     return
-        category[
+        categoryDB[
             item.kind
         ]
 end
 
-local function itemName(item)
+local function getItemName(item)
 
-    local info =
-        dbEntry(item)
+    local db =
+        getDBEntry(
+            item
+        )
 
-    if type(info) == "table" then
+    if type(db) == "table" then
 
-        if info.name then
-            return tostring(info.name)
+        if db.name ~= nil then
+            return tostring(db.name)
         end
 
-        if info.display_name then
-            return tostring(info.display_name)
+        if db.display_name ~= nil then
+            return tostring(db.display_name)
         end
     end
 
@@ -824,24 +860,26 @@ local function itemName(item)
         )
 end
 
-local function categoryName(item)
+local function getCategoryName(item)
 
-    local key =
+    local category =
         tostring(
             item.category
             or "unknown"
         )
 
     return
-        CATEGORY_DISPLAY[key]
-        or key:upper()
+        CATEGORY_DISPLAY[
+            category
+        ]
+        or category:upper()
 end
 
 --============================================================
 -- PET VARIANT
 --============================================================
 
-local function variant(item)
+local function getVariant(item)
 
     if
         type(item) ~= "table"
@@ -851,63 +889,77 @@ local function variant(item)
         return ""
     end
 
-    local p =
-        type(item.properties)
-        == "table"
-
+    local properties =
+        type(item.properties) == "table"
         and item.properties
         or {}
 
     local F =
-        p.flyable == true
+        properties.flyable
+        == true
 
     local R =
-        p.rideable == true
+        properties.rideable
+        == true
 
     local N =
-        p.neon == true
+        properties.neon
+        == true
 
     local M =
-        p.mega_neon == true
+        properties.mega_neon
+        == true
 
     if M then
 
         if F and R then
             return "MFR"
-        elseif F then
-            return "MF"
-        elseif R then
-            return "MR"
-        else
-            return "M"
         end
+
+        if F then
+            return "MF"
+        end
+
+        if R then
+            return "MR"
+        end
+
+        return "M"
     end
 
     if N then
 
         if F and R then
             return "NFR"
-        elseif F then
-            return "NF"
-        elseif R then
-            return "NR"
-        else
-            return "N"
         end
+
+        if F then
+            return "NF"
+        end
+
+        if R then
+            return "NR"
+        end
+
+        return "N"
     end
 
     if F and R then
         return "FR"
-    elseif F then
+    end
+
+    if F then
         return "F"
-    elseif R then
+    end
+
+    if R then
         return "R"
     end
 
     return "NP"
 end
 
-local function variantColor(v)
+local function getVariantColor(v)
 
     if
         v:find(
@@ -943,12 +995,94 @@ local function variantColor(v)
 end
 
 --============================================================
--- DELTA HTTP
+-- EXACT BASELESS FIELD MAP
 --============================================================
 
-boot(
+local PET_VALUE_FIELD = {
+
+    NP =
+        "npRegularValue",
+
+    F =
+        "fValue",
+
+    R =
+        "rValue",
+
+    FR =
+        "regularValue",
+
+    N =
+        "npNeonValue",
+
+    NF =
+        "nfValue",
+
+    NR =
+        "nrValue",
+
+    NFR =
+        "neonValue",
+
+    M =
+        "npMegaValue",
+
+    MF =
+        "mfValue",
+
+    MR =
+        "mrValue",
+
+    MFR =
+        "megaValue",
+}
+
+local PET_DEMAND_FIELD = {
+
+    NP =
+        "npRegularDemand",
+
+    F =
+        "fDemand",
+
+    R =
+        "rDemand",
+
+    FR =
+        "regularDemand",
+
+    N =
+        "npNeonDemand",
+
+    NF =
+        "nfDemand",
+
+    NR =
+        "nrDemand",
+
+    NFR =
+        "neonDemand",
+
+    M =
+        "npMegaDemand",
+
+    MF =
+        "mfDemand",
+
+    MR =
+        "mrDemand",
+
+    MFR =
+        "megaDemand",
+}
+
+--============================================================
+-- HTTP
+--============================================================
+
+setBoot(
     "3/8",
-    "Detecting HTTP"
+    "DETECTING HTTP"
 )
 
 local function detectRequest()
@@ -961,11 +1095,19 @@ local function detectRequest()
         return http_request
     end
 
-    if type(ENV.request) == "function" then
+    if
+        type(ENV.request)
+        == "function"
+    then
+
         return ENV.request
     end
 
-    if type(ENV.http_request) == "function" then
+    if
+        type(ENV.http_request)
+        == "function"
+    then
+
         return ENV.http_request
     end
 
@@ -986,17 +1128,13 @@ local REQUEST =
     detectRequest()
 
 print(
-    "[AMVGG] request =",
+    "[AMVGG] REQUEST =",
     type(REQUEST)
 )
 
---============================================================
--- HTTP
---============================================================
-
 local function download(
     url,
-    rsc
+    useRSC
 )
 
     if REQUEST then
@@ -1019,8 +1157,10 @@ local function download(
                 "identity",
         }
 
-        if rsc then
-            headers["RSC"] = "1"
+        if useRSC then
+
+            headers["RSC"] =
+                "1"
         end
 
         local ok,
@@ -1044,30 +1184,41 @@ local function download(
 
         if ok then
 
-            if type(response) == "string" then
+            if
+                type(response)
+                == "string"
+            then
 
                 return
                     response,
                     200
             end
 
-            if type(response) == "table" then
+            if
+                type(response)
+                == "table"
+            then
+
+                local body =
+                    response.Body
+                    or response.body
+
+                local status =
+                    response.StatusCode
+                    or response.Status
+                    or response.status_code
+                    or 0
 
                 return
-                    response.Body
-                    or response.body,
-
-                    tonumber(
-                        response.StatusCode
-                        or response.Status
-                        or response.status_code
-                    )
+                    body,
+                    tonumber(status)
                     or 0
             end
         end
     end
 
-    local ok, body =
+    local ok,
+        body =
         pcall(
             function()
 
@@ -1086,17 +1237,18 @@ local function download(
             200
     end
 
-    return nil,
+    return
+        nil,
         0
 end
 
 --============================================================
--- BALANCED OBJECT
+-- JSON OBJECT EXTRACTOR
 --============================================================
 
 local function extractObject(
     body,
-    start
+    startPosition
 )
 
     local depth =
@@ -1108,7 +1260,7 @@ local function extractObject(
     local escaped =
         false
 
-    for i = start, #body do
+    for i = startPosition, #body do
 
         local c =
             string.byte(
@@ -1155,7 +1307,7 @@ local function extractObject(
 
                     return
                         body:sub(
-                            start,
+                            startPosition,
                             i
                         ),
                         i
@@ -1163,13 +1315,16 @@ local function extractObject(
             end
         end
     end
+
+    return nil,
+        nil
 end
 
 --============================================================
--- VALUE FIELD CHECK
+-- RSC OBJECT VALIDATION
 --============================================================
 
-local VALUE_FIELDS = {
+local POSSIBLE_VALUE_FIELDS = {
 
     "value",
 
@@ -1192,7 +1347,7 @@ local VALUE_FIELDS = {
     "mrValue",
 }
 
-local function isValueObject(object)
+local function hasValueField(object)
 
     if
         type(object) ~= "table"
@@ -1202,9 +1357,15 @@ local function isValueObject(object)
         return false
     end
 
-    for _, field in ipairs(VALUE_FIELDS) do
+    for _, field in ipairs(
+        POSSIBLE_VALUE_FIELDS
+    ) do
 
-        if object[field] ~= nil then
+        if
+            object[field]
+            ~= nil
+        then
+
             return true
         end
     end
@@ -1213,8 +1374,7 @@ local function isValueObject(object)
 end
 
 --============================================================
--- IMPORTANT FIX:
--- MERGE DUPLICATE RSC OBJECTS
+-- MERGE RSC OBJECTS
 --============================================================
 
 local function mergeObject(
@@ -1232,7 +1392,7 @@ local function mergeObject(
     end
 end
 
-local function parseBody(body)
+local function parseAMVGGBody(body)
 
     local database =
         {}
@@ -1255,41 +1415,37 @@ local function parseBody(body)
 
     while cursor <= #body do
 
-        -- Handles BOTH:
-        -- {"id":"123"
-        -- {"id":123
-
-        local pos =
+        local position =
             body:find(
                 '{"id":',
                 cursor,
                 true
             )
 
-        if not pos then
+        if not position then
             break
         end
 
-        local json,
-            finish =
+        local jsonText,
+            endPosition =
             extractObject(
                 body,
-                pos
+                position
             )
 
         if
-            not json
-            or not finish
+            not jsonText
+            or not endPosition
         then
 
             cursor =
-                pos + 6
+                position + 6
 
             continue
         end
 
         cursor =
-            finish + 1
+            endPosition + 1
 
         local ok,
             object =
@@ -1298,14 +1454,14 @@ local function parseBody(body)
 
                     return
                         HttpService:JSONDecode(
-                            json
+                            jsonText
                         )
                 end
             )
 
         if
             ok
-            and isValueObject(
+            and hasValueField(
                 object
             )
         then
@@ -1326,7 +1482,9 @@ local function parseBody(body)
                         count + 1
                 end
 
-                -- NEVER THROW AWAY SECOND OBJECT
+                -- Merge duplicate RSC appearances.
+                -- Nil never destroys an already-found field.
+
                 mergeObject(
                     database[key],
                     object
@@ -1337,7 +1495,11 @@ local function parseBody(body)
         scanned =
             scanned + 1
 
-        if scanned % 200 == 0 then
+        if
+            scanned % 200
+            == 0
+        then
+
             task.wait()
         end
     end
@@ -1348,7 +1510,7 @@ local function parseBody(body)
 end
 
 --============================================================
--- AMVGG DATABASE
+-- AMVGG STATE
 --============================================================
 
 local AMVGG = {
@@ -1393,7 +1555,7 @@ local AMVGG_CATEGORIES = {
 }
 
 --============================================================
--- DOWNLOAD CATEGORY
+-- LOAD CATEGORY
 --============================================================
 
 local function loadCategory(slug)
@@ -1409,26 +1571,30 @@ local function loadCategory(slug)
             )
         )
 
-    local urls = {
+    local attempts = {
 
         {
-            "https://amvgg.com/values/"
-            .. slug
-            .. "?_rsc="
-            .. token,
+            url =
+                "https://amvgg.com/values/"
+                .. slug
+                .. "?_rsc="
+                .. token,
 
-            true,
+            rsc =
+                true,
         },
 
         {
-            "https://amvgg.com/values/"
-            .. slug,
+            url =
+                "https://amvgg.com/values/"
+                .. slug,
 
-            false,
+            rsc =
+                false,
         },
     }
 
-    for index, data in ipairs(urls) do
+    for index, attempt in ipairs(attempts) do
 
         print(
             "[AMVGG]",
@@ -1440,16 +1606,16 @@ local function loadCategory(slug)
         local body,
             status =
             download(
-                data[1],
-                data[2]
+                attempt.url,
+                attempt.rsc
             )
 
         print(
             "[AMVGG]",
             slug,
-            "HTTP",
+            "HTTP=",
             status,
-            "SIZE",
+            "SIZE=",
             body and #body or 0
         )
 
@@ -1458,23 +1624,23 @@ local function loadCategory(slug)
             and #body > 100
         then
 
-            local db,
+            local database,
                 count =
-                parseBody(
+                parseAMVGGBody(
                     body
                 )
 
             print(
                 "[AMVGG]",
                 slug,
-                "PARSED",
+                "PARSED=",
                 count
             )
 
             if count > 0 then
 
                 return
-                    db,
+                    database,
                     count
             end
         end
@@ -1484,12 +1650,13 @@ local function loadCategory(slug)
         )
     end
 
-    return nil,
+    return
+        nil,
         0
 end
 
 --============================================================
--- AMVGG FULL REFRESH
+-- LOAD ALL AMVGG
 --============================================================
 
 local function loadAllAMVGG()
@@ -1517,34 +1684,31 @@ local function loadAllAMVGG()
         "[AMVGG] FULL LOAD START"
     )
 
-    for _, slug in ipairs(AMVGG_CATEGORIES) do
+    for _, slug in ipairs(
+        AMVGG_CATEGORIES
+    ) do
 
         local ok,
-            db,
+            database,
             count =
             pcall(
                 function()
 
-                    local result,
-                        amount =
+                    return
                         loadCategory(
                             slug
                         )
-
-                    return
-                        result,
-                        amount
                 end
             )
 
         if
             ok
-            and type(db) == "table"
+            and type(database) == "table"
             and count > 0
         then
 
             newCategories[slug] =
-                db
+                database
 
             newCounts[slug] =
                 count
@@ -1552,25 +1716,24 @@ local function loadAllAMVGG()
             total =
                 total + count
 
-        else
+        elseif AMVGG.categories[slug] then
 
-            -- keep previous working category
-            if AMVGG.categories[slug] then
+            -- Keep previous successful copy
+            -- if one category temporarily fails.
 
-                newCategories[slug] =
-                    AMVGG.categories[slug]
+            newCategories[slug] =
+                AMVGG.categories[slug]
 
-                newCounts[slug] =
-                    AMVGG.counts[slug]
+            newCounts[slug] =
+                AMVGG.counts[slug]
+                or 0
+
+            total =
+                total
+                + (
+                    newCounts[slug]
                     or 0
-
-                total =
-                    total
-                    + (
-                        newCounts[slug]
-                        or 0
-                    )
-            end
+                )
         end
 
         task.wait()
@@ -1598,6 +1761,9 @@ local function loadAllAMVGG()
         AMVGG.ready =
             true
 
+        AMVGG.error =
+            nil
+
         AMVGG.version =
             AMVGG.version + 1
 
@@ -1606,14 +1772,17 @@ local function loadAllAMVGG()
 
         print(
             "[AMVGG] READY",
-            "PETS",
+            "PETS=",
             newCounts.pets,
-            "TOTAL",
+            "ALL=",
             total
         )
 
         return true
     end
+
+    AMVGG.ready =
+        false
 
     AMVGG.error =
         "NO PET DATABASE"
@@ -1622,7 +1791,7 @@ local function loadAllAMVGG()
 end
 
 --============================================================
--- ITEM -> AMVGG CATEGORY
+-- ADOPT ME CATEGORY -> AMVGG CATEGORY
 --============================================================
 
 local CATEGORY_TO_AMVGG = {
@@ -1653,7 +1822,7 @@ local CATEGORY_TO_AMVGG = {
 }
 
 --============================================================
--- FIND BY NAME
+-- FIND ITEM BY NAME
 --============================================================
 
 local function findInCategory(
@@ -1661,28 +1830,35 @@ local function findInCategory(
     name
 )
 
-    local db =
+    local database =
         AMVGG.categories[
             slug
         ]
 
-    if type(db) ~= "table" then
+    if type(database) ~= "table" then
         return nil
     end
 
-    local possible =
-        aliases(name)
+    local aliases =
+        buildAliases(
+            name
+        )
 
-    for key in pairs(possible) do
+    -- Exact alias first.
 
-        if db[key] then
+    for key in pairs(aliases) do
+
+        if database[key] then
 
             return
-                db[key]
+                database[key],
+                key,
+                true
         end
     end
 
-    -- safe unique partial match
+    -- Unique partial fallback is ONLY for finding name.
+    -- It NEVER changes the value/variant.
 
     local found =
         nil
@@ -1690,23 +1866,20 @@ local function findInCategory(
     local foundKey =
         nil
 
-    for key in pairs(possible) do
+    for alias in pairs(aliases) do
 
-        if #key >= 6 then
+        if #alias >= 6 then
 
-            for dbKey,
-                entry
-                in pairs(db)
-            do
+            for key, entry in pairs(database) do
 
                 if
-                    dbKey:find(
-                        key,
+                    key:find(
+                        alias,
                         1,
                         true
                     )
-                    or key:find(
-                        dbKey,
+                    or alias:find(
+                        key,
                         1,
                         true
                     )
@@ -1714,7 +1887,7 @@ local function findInCategory(
 
                     if
                         found
-                        and foundKey ~= dbKey
+                        and foundKey ~= key
                     then
 
                         return nil
@@ -1724,30 +1897,32 @@ local function findInCategory(
                         entry
 
                     foundKey =
-                        dbKey
+                        key
                 end
             end
         end
     end
 
-    return found
+    return
+        found,
+        foundKey,
+        false
 end
 
 --============================================================
--- FIND ITEM
+-- FIND AMVGG ITEM
 --============================================================
 
-local function findAMVGG(item)
+local function findAMVGGItem(item)
 
     local name =
-        itemName(
+        getItemName(
             item
         )
 
     if item.category == "pets" then
 
-        -- Eggs are stored as pets inside Adopt Me
-        -- but separate category on AMVGG.
+        -- Adopt Me puts eggs in pets category.
 
         if
             name:lower():find(
@@ -1784,7 +1959,6 @@ local function findAMVGG(item)
                 "pets"
         end
 
-        -- Some special eggs don't literally contain Egg.
         local egg =
             findInCategory(
                 "eggs",
@@ -1827,248 +2001,89 @@ local function findAMVGG(item)
 end
 
 --============================================================
--- PET VALUE SELECTION
---
--- EXACT FIELD ALWAYS FIRST.
---
--- If AMVGG left the exact sub-variant null, only then
--- use another value from SAME evolution tier.
+-- GENERIC NON-PET BASELESS VALUE
 --============================================================
 
-local PET_FIELDS = {
+local function getGenericBaselessValue(entry)
 
-    NP = {
-        "npRegularValue",
-        "regularValue",
-        "fValue",
-        "rValue",
-        "value",
-    },
+    if type(entry) ~= "table" then
 
-    F = {
-        "fValue",
-        "regularValue",
-        "npRegularValue",
-        "rValue",
-        "value",
-    },
-
-    R = {
-        "rValue",
-        "regularValue",
-        "npRegularValue",
-        "fValue",
-        "value",
-    },
-
-    FR = {
-        "regularValue",
-        "fValue",
-        "rValue",
-        "npRegularValue",
-        "value",
-    },
-
-    N = {
-        "npNeonValue",
-        "neonValue",
-        "nfValue",
-        "nrValue",
-    },
-
-    NF = {
-        "nfValue",
-        "neonValue",
-        "npNeonValue",
-        "nrValue",
-    },
-
-    NR = {
-        "nrValue",
-        "neonValue",
-        "npNeonValue",
-        "nfValue",
-    },
-
-    NFR = {
-        "neonValue",
-        "nfValue",
-        "nrValue",
-        "npNeonValue",
-    },
-
-    M = {
-        "npMegaValue",
-        "megaValue",
-        "mfValue",
-        "mrValue",
-    },
-
-    MF = {
-        "mfValue",
-        "megaValue",
-        "npMegaValue",
-        "mrValue",
-    },
-
-    MR = {
-        "mrValue",
-        "megaValue",
-        "npMegaValue",
-        "mfValue",
-    },
-
-    MFR = {
-        "megaValue",
-        "mfValue",
-        "mrValue",
-        "npMegaValue",
-    },
-}
-
-local DEMAND_FIELDS = {
-
-    NP = {
-        "npRegularDemand",
-        "regularDemand",
-    },
-
-    F = {
-        "fDemand",
-        "regularDemand",
-    },
-
-    R = {
-        "rDemand",
-        "regularDemand",
-    },
-
-    FR = {
-        "regularDemand",
-    },
-
-    N = {
-        "npNeonDemand",
-        "neonDemand",
-    },
-
-    NF = {
-        "nfDemand",
-        "neonDemand",
-    },
-
-    NR = {
-        "nrDemand",
-        "neonDemand",
-    },
-
-    NFR = {
-        "neonDemand",
-    },
-
-    M = {
-        "npMegaDemand",
-        "megaDemand",
-    },
-
-    MF = {
-        "mfDemand",
-        "megaDemand",
-    },
-
-    MR = {
-        "mrDemand",
-        "megaDemand",
-    },
-
-    MFR = {
-        "megaDemand",
-    },
-}
-
-local function firstNumber(
-    entry,
-    fields
-)
-
-    for index,
-        field
-        in ipairs(fields)
-    do
-
-        local value =
-            numeric(
-                entry[field]
-            )
-
-        if value ~= nil then
-
-            return
-                value,
-                field,
-                index > 1
-        end
+        return
+            nil,
+            nil
     end
-end
 
-local function firstValue(
-    entry,
-    fields
-)
+    -- These are not cross-variant fallbacks.
+    -- Different AMVGG categories expose their single baseless
+    -- value under slightly different field names.
 
-    for _, field in ipairs(fields) do
+    if
+        toNumber(
+            entry.value
+        )
+        ~= nil
+    then
 
-        if entry[field] ~= nil then
-
-            return
-                entry[field],
-                field
-        end
+        return
+            toNumber(
+                entry.value
+            ),
+            "value"
     end
-end
 
---============================================================
--- GENERIC VALUE
---============================================================
+    if
+        toNumber(
+            entry.npRegularValue
+        )
+        ~= nil
+    then
 
-local function genericValue(entry)
+        return
+            toNumber(
+                entry.npRegularValue
+            ),
+            "npRegularValue"
+    end
 
-    local fields = {
+    if
+        toNumber(
+            entry.regularValue
+        )
+        ~= nil
+    then
 
-        "value",
-
-        "regularValue",
-
-        "npRegularValue",
-    }
+        return
+            toNumber(
+                entry.regularValue
+            ),
+            "regularValue"
+    end
 
     return
-        firstNumber(
-            entry,
-            fields
-        )
+        nil,
+        nil
 end
 
 --============================================================
 -- ANALYZE ITEM
 --============================================================
 
-local function analyze(item)
+local function analyzeItem(item)
 
     local result = {
 
         name =
-            itemName(
+            getItemName(
                 item
             ),
 
         category =
-            categoryName(
+            getCategoryName(
                 item
             ),
 
         variant =
-            variant(
+            getVariant(
                 item
             ),
 
@@ -2080,9 +2095,6 @@ local function analyze(item)
 
         demand =
             nil,
-
-        fallback =
-            false,
 
         field =
             nil,
@@ -2098,15 +2110,15 @@ local function analyze(item)
 
         result.reason =
             AMVGG.loading
-            and "LOADING"
-            or "AMVGG OFFLINE"
+            and "AMVGG LOADING"
+            or "AMVGG NOT READY"
 
         return result
     end
 
     local entry,
         source =
-        findAMVGG(
+        findAMVGGItem(
             item
         )
 
@@ -2125,7 +2137,7 @@ local function analyze(item)
         source
 
     --========================================================
-    -- PET
+    -- PET = STRICT EXACT BASELESS VARIANT
     --========================================================
 
     if source == "pets" then
@@ -2133,10 +2145,12 @@ local function analyze(item)
         local v =
             result.variant
 
-        local fields =
-            PET_FIELDS[v]
+        local valueField =
+            PET_VALUE_FIELD[
+                v
+            ]
 
-        if not fields then
+        if not valueField then
 
             result.reason =
                 "UNKNOWN VARIANT"
@@ -2144,55 +2158,51 @@ local function analyze(item)
             return result
         end
 
-        local value,
-            field,
-            fallback =
-            firstNumber(
-                entry,
-                fields
+        local exactValue =
+            toNumber(
+                entry[
+                    valueField
+                ]
             )
 
-        result.value =
-            value
-
         result.field =
-            field
+            valueField
 
-        result.fallback =
-            fallback == true
+        result.value =
+            exactValue
 
-        local demandFields =
-            DEMAND_FIELDS[v]
+        local demandField =
+            PET_DEMAND_FIELD[
+                v
+            ]
 
-        if demandFields then
+        if demandField then
 
             result.demand =
-                firstValue(
-                    entry,
-                    demandFields
-                )
+                entry[
+                    demandField
+                ]
         end
 
-        if value == nil then
+        if exactValue == nil then
 
             result.reason =
-                "NO VARIANT VALUE"
+                "NO EXACT BASELESS VALUE"
         end
 
         return result
     end
 
     --========================================================
-    -- OTHER AMVGG CATEGORY
+    -- OTHER CATEGORY
     --========================================================
 
     result.variant =
         ""
 
     local value,
-        field,
-        fallback =
-        genericValue(
+        field =
+        getGenericBaselessValue(
             entry
         )
 
@@ -2202,9 +2212,6 @@ local function analyze(item)
     result.field =
         field
 
-    result.fallback =
-        fallback == true
-
     result.demand =
         entry.demand
         or entry.regularDemand
@@ -2212,25 +2219,30 @@ local function analyze(item)
     if value == nil then
 
         result.reason =
-            "NO VALUE"
+            "NO BASELESS VALUE"
     end
 
     return result
 end
 
 --============================================================
--- PLAYER
+-- PLAYER HELPERS
 --============================================================
 
 local function playerName(value)
 
-    if typeof(value) == "Instance" then
+    if
+        typeof(value)
+        == "Instance"
+    then
+
         return value.Name
     end
 
     return
         tostring(
-            value or "Unknown"
+            value
+            or "Unknown"
         )
 end
 
@@ -2247,19 +2259,19 @@ local function isMe(value)
 end
 
 --============================================================
--- GUI CORE
+-- GUI
 --============================================================
 
-boot(
+setBoot(
     "4/8",
-    "Building GUI"
+    "BUILDING GUI"
 )
 
 local Gui =
     Instance.new("ScreenGui")
 
 Gui.Name =
-    "AdoptMeTradeAnalyzerV1160"
+    "AdoptMeTradeAnalyzerV1161"
 
 Gui.ResetOnSpawn =
     false
@@ -2301,18 +2313,18 @@ Main.ClipsDescendants =
 Main.Parent =
     Gui
 
-corner(
+addCorner(
     Main,
     12
 )
 
-stroke(
+addStroke(
     Main,
     0.15
 )
 
 --============================================================
--- TOP
+-- TOP BAR
 --============================================================
 
 local Top =
@@ -2335,7 +2347,7 @@ Top.BorderSizePixel =
 Top.Parent =
     Main
 
-label(
+makeLabel(
     Top,
 
     "ADOPT ME  •  TRADE ANALYZER",
@@ -2357,11 +2369,11 @@ label(
     C.TEXT
 )
 
-local Version =
-    label(
+local VersionLabel =
+    makeLabel(
         Top,
 
-        "V11.6.0",
+        "V11.6.1",
 
         UDim2.fromOffset(
             72,
@@ -2381,23 +2393,23 @@ local Version =
         Enum.TextXAlignment.Center
     )
 
-Version.BackgroundTransparency =
+VersionLabel.BackgroundTransparency =
     0
 
-Version.BackgroundColor3 =
+VersionLabel.BackgroundColor3 =
     Color3.fromRGB(
         35,
         50,
         80
     )
 
-corner(
-    Version,
+addCorner(
+    VersionLabel,
     6
 )
 
-local Close =
-    button(
+local CloseButton =
+    makeButton(
         Top,
 
         "X",
@@ -2416,14 +2428,14 @@ local Close =
     )
 
 --============================================================
--- DRAG MAIN
+-- DRAG WINDOW
 --============================================================
 
 local dragging =
     false
 
 local dragStart
-local originalPosition
+local dragOrigin
 
 Top.InputBegan:Connect(
     function(input)
@@ -2442,7 +2454,7 @@ Top.InputBegan:Connect(
             dragStart =
                 input.Position
 
-            originalPosition =
+            dragOrigin =
                 Main.Position
         end
     end
@@ -2481,15 +2493,15 @@ UIS.InputChanged:Connect(
             - dragStart
 
         local x =
-            originalPosition.X.Scale
+            dragOrigin.X.Scale
             * viewport.X
-            + originalPosition.X.Offset
+            + dragOrigin.X.Offset
             + delta.X
 
         local y =
-            originalPosition.Y.Scale
+            dragOrigin.Y.Scale
             * viewport.Y
-            + originalPosition.Y.Offset
+            + dragOrigin.Y.Offset
             + delta.Y
 
         x =
@@ -2569,7 +2581,7 @@ Sidebar.BorderSizePixel =
 Sidebar.Parent =
     Main
 
-label(
+makeLabel(
     Sidebar,
 
     "MENU",
@@ -2626,31 +2638,31 @@ local Navigation =
 
 local function createPage(name)
 
-    local x =
+    local page =
         Instance.new("Frame")
 
-    x.Name =
+    page.Name =
         name
 
-    x.Size =
+    page.Size =
         UDim2.fromScale(
             1,
             1
         )
 
-    x.BackgroundTransparency =
+    page.BackgroundTransparency =
         1
 
-    x.Visible =
+    page.Visible =
         false
 
-    x.Parent =
+    page.Parent =
         Content
 
     Pages[name] =
-        x
+        page
 
-    return x
+    return page
 end
 
 local function setPage(name)
@@ -2661,41 +2673,42 @@ local function setPage(name)
             key == name
     end
 
-    for key, nav in pairs(Navigation) do
+    for key, navButton in pairs(Navigation) do
 
         if key == name then
 
-            nav.BackgroundColor3 =
+            navButton.BackgroundColor3 =
                 Color3.fromRGB(
                     48,
                     76,
                     130
                 )
 
-            nav.TextColor3 =
+            navButton.TextColor3 =
                 C.TEXT
 
         else
 
-            nav.BackgroundColor3 =
+            navButton.BackgroundColor3 =
                 C.PANEL
 
-            nav.TextColor3 =
+            navButton.TextColor3 =
                 C.MUTED
         end
     end
 end
 
-local function nav(
+local function createNav(
     name,
     y
 )
 
-    local x =
-        button(
+    local navButton =
+        makeButton(
             Sidebar,
 
-            "   " .. name,
+            "   "
+            .. name,
 
             UDim2.new(
                 1,
@@ -2710,16 +2723,16 @@ local function nav(
             )
         )
 
-    x.TextXAlignment =
+    navButton.TextXAlignment =
         Enum.TextXAlignment.Left
 
-    x.BackgroundColor3 =
+    navButton.BackgroundColor3 =
         C.PANEL
 
-    x.TextColor3 =
+    navButton.TextColor3 =
         C.MUTED
 
-    x.Activated:Connect(
+    navButton.Activated:Connect(
         function()
 
             setPage(
@@ -2729,25 +2742,25 @@ local function nav(
     )
 
     Navigation[name] =
-        x
+        navButton
 end
 
-nav(
+createNav(
     "TRADE",
     46
 )
 
-nav(
+createNav(
     "VALUES",
     96
 )
 
-nav(
+createNav(
     "UPDATES",
     146
 )
 
-nav(
+createNav(
     "SETTINGS",
     196
 )
@@ -2756,9 +2769,9 @@ nav(
 -- TRADE PAGE
 --============================================================
 
-boot(
+setBoot(
     "5/8",
-    "Building trade page"
+    "BUILDING TRADE PAGE"
 )
 
 local TradePage =
@@ -2766,7 +2779,7 @@ local TradePage =
         "TRADE"
     )
 
-label(
+makeLabel(
     TradePage,
 
     "Current Trade",
@@ -2788,8 +2801,8 @@ label(
     C.TEXT
 )
 
-local Counts =
-    label(
+local CountsLabel =
+    makeLabel(
         TradePage,
 
         "YOU 0/18   •   THEM 0/18",
@@ -2811,8 +2824,8 @@ local Counts =
         C.MUTED
     )
 
-local Status =
-    label(
+local AMVGGStatus =
+    makeLabel(
         TradePage,
 
         "AMVGG: WAITING",
@@ -2834,8 +2847,8 @@ local Status =
         C.YELLOW
     )
 
-local Stage =
-    label(
+local StageLabel =
+    makeLabel(
         TradePage,
 
         "NO ACTIVE TRADE",
@@ -2858,27 +2871,27 @@ local Stage =
         Enum.TextXAlignment.Center
     )
 
-Stage.BackgroundTransparency =
+StageLabel.BackgroundTransparency =
     0
 
-Stage.BackgroundColor3 =
+StageLabel.BackgroundColor3 =
     C.PANEL2
 
-corner(
-    Stage,
+addCorner(
+    StageLabel,
     7
 )
 
-local Area =
+local TradeArea =
     Instance.new("Frame")
 
-Area.Position =
+TradeArea.Position =
     UDim2.fromOffset(
         16,
         77
     )
 
-Area.Size =
+TradeArea.Size =
     UDim2.new(
         1,
         -32,
@@ -2886,22 +2899,22 @@ Area.Size =
         -89
     )
 
-Area.BackgroundColor3 =
+TradeArea.BackgroundColor3 =
     C.PANEL
 
-Area.BorderSizePixel =
+TradeArea.BorderSizePixel =
     0
 
-Area.Parent =
+TradeArea.Parent =
     TradePage
 
-corner(
-    Area,
+addCorner(
+    TradeArea,
     10
 )
 
-stroke(
-    Area,
+addStroke(
+    TradeArea,
     0.35
 )
 
@@ -2932,9 +2945,9 @@ Center.BackgroundTransparency =
     1
 
 Center.Parent =
-    Area
+    TradeArea
 
-label(
+makeLabel(
     Center,
 
     "⇄",
@@ -2959,8 +2972,8 @@ label(
     Enum.TextXAlignment.Center
 )
 
-local Result =
-    label(
+local TradeResult =
+    makeLabel(
         Center,
 
         "WAIT",
@@ -2985,8 +2998,8 @@ local Result =
         Enum.TextXAlignment.Center
     )
 
-local Difference =
-    label(
+local TradeDifference =
+    makeLabel(
         Center,
 
         "",
@@ -3011,21 +3024,21 @@ local Difference =
         Enum.TextXAlignment.Center
     )
 
-Difference.TextWrapped =
+TradeDifference.TextWrapped =
     true
 
 --============================================================
--- OFFER
+-- OFFER PANEL
 --============================================================
 
-local function offerPanel(x)
+local function createOfferPanel(xPosition)
 
     local Panel =
         Instance.new("Frame")
 
     Panel.Position =
         UDim2.new(
-            x,
+            xPosition,
             0,
             0,
             8
@@ -3046,15 +3059,15 @@ local function offerPanel(x)
         0
 
     Panel.Parent =
-        Area
+        TradeArea
 
-    corner(
+    addCorner(
         Panel,
         9
     )
 
     local Name =
-        label(
+        makeLabel(
             Panel,
 
             "PLAYER",
@@ -3078,7 +3091,7 @@ local function offerPanel(x)
         )
 
     local Count =
-        label(
+        makeLabel(
             Panel,
 
             "0 / 18",
@@ -3099,7 +3112,7 @@ local function offerPanel(x)
         )
 
     local Ready =
-        label(
+        makeLabel(
             Panel,
 
             "WAITING",
@@ -3132,13 +3145,13 @@ local function offerPanel(x)
             52
         )
 
-    corner(
+    addCorner(
         Ready,
         5
     )
 
     local Total =
-        label(
+        makeLabel(
             Panel,
 
             "TOTAL: 0",
@@ -3209,7 +3222,7 @@ local function offerPanel(x)
     Scroll.Parent =
         Panel
 
-    corner(
+    addCorner(
         Scroll,
         7
     )
@@ -3272,7 +3285,7 @@ local function offerPanel(x)
     Padding.Parent =
         Scroll
 
-    local function canvas()
+    local function updateCanvas()
 
         Scroll.CanvasSize =
             UDim2.fromOffset(
@@ -3285,14 +3298,17 @@ local function offerPanel(x)
     Grid:GetPropertyChangedSignal(
         "AbsoluteContentSize"
     ):Connect(
-        canvas
+        updateCanvas
     )
 
     task.defer(
-        canvas
+        updateCanvas
     )
 
     return {
+
+        Panel =
+            Panel,
 
         Name =
             Name,
@@ -3315,20 +3331,20 @@ local function offerPanel(x)
 end
 
 local Yours =
-    offerPanel(
+    createOfferPanel(
         0.008
     )
 
 local Theirs =
-    offerPanel(
+    createOfferPanel(
         0.567
     )
 
 --============================================================
--- SLOTS
+-- TRADE SLOTS
 --============================================================
 
-local function makeSlot(
+local function createTradeSlot(
     side,
     index
 )
@@ -3354,21 +3370,21 @@ local function makeSlot(
     Frame.Parent =
         side.Scroll
 
-    corner(
+    addCorner(
         Frame,
         7
     )
 
-    stroke(
+    addStroke(
         Frame,
         0.5
     )
 
-    label(
+    makeLabel(
         Frame,
 
         "#"
-        .. index,
+        .. tostring(index),
 
         UDim2.fromOffset(
             28,
@@ -3386,7 +3402,7 @@ local function makeSlot(
     )
 
     local Variant =
-        label(
+        makeLabel(
             Frame,
 
             "",
@@ -3410,7 +3426,7 @@ local function makeSlot(
         )
 
     local Name =
-        label(
+        makeLabel(
             Frame,
 
             "EMPTY",
@@ -3443,7 +3459,7 @@ local function makeSlot(
         true
 
     local Value =
-        label(
+        makeLabel(
             Frame,
 
             "",
@@ -3469,7 +3485,7 @@ local function makeSlot(
         )
 
     local Category =
-        label(
+        makeLabel(
             Frame,
 
             "",
@@ -3494,7 +3510,7 @@ local function makeSlot(
             Enum.TextXAlignment.Center
         )
 
-    local slot = {
+    side.Slots[index] = {
 
         Frame =
             Frame,
@@ -3513,30 +3529,35 @@ local function makeSlot(
 
         Item =
             nil,
+
+        Analysis =
+            nil,
     }
-
-    side.Slots[index] =
-        slot
-
-    return slot
 end
 
 for i = 1, 18 do
 
-    makeSlot(
+    createTradeSlot(
         Yours,
         i
     )
 
-    makeSlot(
+    createTradeSlot(
         Theirs,
         i
     )
 end
 
+--============================================================
+-- SLOT UPDATE
+--============================================================
+
 local function clearSlot(slot)
 
     slot.Item =
+        nil
+
+    slot.Analysis =
         nil
 
     slot.Name.Text =
@@ -3557,6 +3578,9 @@ local function clearSlot(slot)
 
     slot.Category.Text =
         ""
+
+    slot.Frame.BackgroundColor3 =
+        C.SLOT
 end
 
 local function fillSlot(
@@ -3568,9 +3592,12 @@ local function fillSlot(
         item
 
     local data =
-        analyze(
+        analyzeItem(
             item
         )
+
+    slot.Analysis =
+        data
 
     slot.Name.Text =
         data.name
@@ -3582,7 +3609,7 @@ local function fillSlot(
         data.variant
 
     slot.Variant.TextColor3 =
-        variantColor(
+        getVariantColor(
             data.variant
         )
 
@@ -3593,25 +3620,22 @@ local function fillSlot(
 
         slot.Value.Text =
             "V "
-            .. numText(
+            .. numberText(
                 data.value
             )
 
         slot.Value.TextColor3 =
-            data.fallback
-            and C.YELLOW
-            or C.ACCENT
+            C.ACCENT
 
-        if data.fallback then
-
-            print(
-                "[AMVGG FALLBACK]",
-                data.name,
-                data.variant,
-                "FIELD=",
-                data.field
-            )
-        end
+        print(
+            "[BASELESS EXACT]",
+            data.name,
+            data.variant,
+            "=",
+            data.value,
+            "FIELD=",
+            data.field
+        )
 
         return
             data.value,
@@ -3632,13 +3656,22 @@ local function fillSlot(
             C.RED
     end
 
+    print(
+        "[BASELESS MISSING]",
+        data.name,
+        data.variant,
+        data.reason,
+        "FIELD=",
+        data.field
+    )
+
     return
         0,
         false
 end
 
 --============================================================
--- SIDE
+-- SIDE UPDATE
 --============================================================
 
 local function updateSide(
@@ -3651,9 +3684,7 @@ local function updateSide(
 
     if
         type(offer) == "table"
-        and type(
-            offer.items
-        ) == "table"
+        and type(offer.items) == "table"
     then
 
         items =
@@ -3670,17 +3701,21 @@ local function updateSide(
         0
 
     side.Count.Text =
-        count .. " / 18"
+        tostring(count)
+        .. " / 18"
 
     for i = 1, 18 do
 
-        if items[i] then
+        local item =
+            items[i]
+
+        if item then
 
             local value,
                 known =
                 fillSlot(
                     side.Slots[i],
-                    items[i]
+                    item
                 )
 
             if known then
@@ -3714,7 +3749,9 @@ local function updateSide(
 
         side.Total.Text =
             "TOTAL: "
-            .. numText(total)
+            .. numberText(
+                total
+            )
 
         side.Total.TextColor3 =
             C.ACCENT
@@ -3723,9 +3760,13 @@ local function updateSide(
 
         side.Total.Text =
             "KNOWN: "
-            .. numText(total)
+            .. numberText(
+                total
+            )
             .. "  •  ?x"
-            .. missing
+            .. tostring(
+                missing
+            )
 
         side.Total.TextColor3 =
             C.YELLOW
@@ -3776,29 +3817,27 @@ local function updateSide(
 end
 
 --============================================================
--- SIGNATURE
+-- OFFER SIGNATURE
 --============================================================
 
-local function signature(
-    offer
-)
+local function offerSignature(offer)
 
     if
         type(offer) ~= "table"
-        or type(
-            offer.items
-        ) ~= "table"
+        or type(offer.items) ~= "table"
     then
 
         return "-"
     end
 
-    local x =
+    local result =
         {}
 
-    for index, item in ipairs(offer.items) do
+    for index, item in ipairs(
+        offer.items
+    ) do
 
-        x[#x + 1] =
+        result[#result + 1] =
             tostring(
                 item.unique
                 or item.kind
@@ -3806,31 +3845,34 @@ local function signature(
             )
     end
 
-    x[#x + 1] =
+    result[#result + 1] =
         tostring(
             offer.negotiated
         )
 
-    x[#x + 1] =
+    result[#result + 1] =
         tostring(
             offer.confirmed
         )
 
     return
         table.concat(
-            x,
+            result,
             "|"
         )
 end
 
-local LastSignature =
+local LastTradeSignature =
     nil
 
 --============================================================
--- RESULT
+-- TRADE RESULT
 --============================================================
 
-local function result(
+local FAIR_PERCENT =
+    0.02
+
+local function calculateResult(
     mine,
     theirs
 )
@@ -3840,13 +3882,13 @@ local function result(
         or theirs.missing > 0
     then
 
-        Result.Text =
+        TradeResult.Text =
             "INCOMPLETE"
 
-        Result.TextColor3 =
+        TradeResult.TextColor3 =
             C.YELLOW
 
-        Difference.Text =
+        TradeDifference.Text =
             "missing values"
 
         return
@@ -3857,13 +3899,13 @@ local function result(
         and theirs.count == 0
     then
 
-        Result.Text =
+        TradeResult.Text =
             "WAIT"
 
-        Result.TextColor3 =
+        TradeResult.TextColor3 =
             C.MUTED
 
-        Difference.Text =
+        TradeDifference.Text =
             ""
 
         return
@@ -3886,47 +3928,47 @@ local function result(
         )
         / maximum
 
-    Difference.Text =
+    TradeDifference.Text =
         (
             difference >= 0
             and "+"
             or ""
         )
-        .. numText(
+        .. numberText(
             difference
         )
 
-    if percent <= 0.02 then
+    if percent <= FAIR_PERCENT then
 
-        Result.Text =
+        TradeResult.Text =
             "FAIR"
 
-        Result.TextColor3 =
+        TradeResult.TextColor3 =
             C.YELLOW
 
     elseif difference > 0 then
 
-        Result.Text =
+        TradeResult.Text =
             "WIN"
 
-        Result.TextColor3 =
+        TradeResult.TextColor3 =
             C.GREEN
 
     else
 
-        Result.Text =
+        TradeResult.Text =
             "LOSE"
 
-        Result.TextColor3 =
+        TradeResult.TextColor3 =
             C.RED
     end
 end
 
 --============================================================
--- TRADE UPDATE
+-- NO TRADE
 --============================================================
 
-local function noTrade()
+local function showNoTrade()
 
     Yours.Name.Text =
         LocalPlayer.Name
@@ -3934,7 +3976,7 @@ local function noTrade()
     Theirs.Name.Text =
         "NO PARTNER"
 
-    Stage.Text =
+    StageLabel.Text =
         "NO ACTIVE TRADE"
 
     local mine =
@@ -3949,18 +3991,23 @@ local function noTrade()
             nil
         )
 
-    Counts.Text =
+    CountsLabel.Text =
         "YOU 0/18   •   THEM 0/18"
 
-    result(
+    calculateResult(
         mine,
         theirs
     )
 end
 
+--============================================================
+-- TRADE UPDATE
+--============================================================
+
 local function updateTrade()
 
-    local ok, trade =
+    local ok,
+        trade =
         pcall(
             function()
 
@@ -3976,13 +4023,14 @@ local function updateTrade()
         or type(trade) ~= "table"
     then
 
-        noTrade()
+        showNoTrade()
 
         return
     end
 
     local myOffer
     local theirOffer
+
     local me
     local partner
 
@@ -4015,7 +4063,7 @@ local function updateTrade()
             trade.sender
     end
 
-    local sig =
+    local signature =
         tostring(
             trade.trade_id
         )
@@ -4024,22 +4072,28 @@ local function updateTrade()
             trade.current_stage
         )
         .. ":"
-        .. signature(
+        .. offerSignature(
             myOffer
         )
         .. ":"
-        .. signature(
+        .. offerSignature(
             theirOffer
         )
-        .. ":"
-        .. AMVGG.version
+        .. ":AMVGG:"
+        .. tostring(
+            AMVGG.version
+        )
 
-    if sig == LastSignature then
+    if
+        signature
+        == LastTradeSignature
+    then
+
         return
     end
 
-    LastSignature =
-        sig
+    LastTradeSignature =
+        signature
 
     Yours.Name.Text =
         playerName(me)
@@ -4047,7 +4101,7 @@ local function updateTrade()
     Theirs.Name.Text =
         playerName(partner)
 
-    Stage.Text =
+    StageLabel.Text =
         tostring(
             trade.current_stage
             or "UNKNOWN"
@@ -4065,14 +4119,18 @@ local function updateTrade()
             theirOffer
         )
 
-    Counts.Text =
+    CountsLabel.Text =
         "YOU "
-        .. mine.count
+        .. tostring(
+            mine.count
+        )
         .. "/18   •   THEM "
-        .. theirs.count
+        .. tostring(
+            theirs.count
+        )
         .. "/18"
 
-    result(
+    calculateResult(
         mine,
         theirs
     )
@@ -4082,9 +4140,9 @@ end
 -- VALUES PAGE
 --============================================================
 
-boot(
+setBoot(
     "6/8",
-    "Building values page"
+    "BUILDING VALUES PAGE"
 )
 
 local ValuesPage =
@@ -4092,10 +4150,10 @@ local ValuesPage =
         "VALUES"
     )
 
-label(
+makeLabel(
     ValuesPage,
 
-    "AMVGG Values",
+    "AMVGG Baseless Values",
 
     UDim2.new(
         1,
@@ -4115,7 +4173,7 @@ label(
 )
 
 local ValuesStatus =
-    label(
+    makeLabel(
         ValuesPage,
 
         "AMVGG: WAITING",
@@ -4137,16 +4195,16 @@ local ValuesStatus =
         C.YELLOW
     )
 
-local Search =
+local SearchBox =
     Instance.new("TextBox")
 
-Search.Position =
+SearchBox.Position =
     UDim2.fromOffset(
         20,
         84
     )
 
-Search.Size =
+SearchBox.Size =
     UDim2.new(
         0.64,
         -20,
@@ -4154,40 +4212,40 @@ Search.Size =
         34
     )
 
-Search.BackgroundColor3 =
+SearchBox.BackgroundColor3 =
     C.PANEL
 
-Search.BorderSizePixel =
+SearchBox.BorderSizePixel =
     0
 
-Search.PlaceholderText =
-    "Dark Choccybunny"
+SearchBox.PlaceholderText =
+    "Pilot Gull"
 
-Search.PlaceholderColor3 =
+SearchBox.PlaceholderColor3 =
     C.MUTED
 
-Search.TextColor3 =
+SearchBox.TextColor3 =
     C.TEXT
 
-Search.Font =
+SearchBox.Font =
     Enum.Font.Code
 
-Search.TextSize =
+SearchBox.TextSize =
     11
 
-Search.ClearTextOnFocus =
+SearchBox.ClearTextOnFocus =
     false
 
-Search.Parent =
+SearchBox.Parent =
     ValuesPage
 
-corner(
-    Search,
+addCorner(
+    SearchBox,
     7
 )
 
 local SearchButton =
-    button(
+    makeButton(
         ValuesPage,
 
         "SEARCH",
@@ -4205,8 +4263,8 @@ local SearchButton =
         )
     )
 
-local Refresh =
-    button(
+local RefreshButton =
+    makeButton(
         ValuesPage,
 
         "REFRESH",
@@ -4274,14 +4332,32 @@ ResultBox.Text =
 ResultBox.Parent =
     ValuesPage
 
-corner(
+addCorner(
     ResultBox,
     8
 )
 
 --============================================================
--- SEARCH ALL DB
+-- VALUES SEARCH
 --============================================================
+
+local VARIANT_ORDER = {
+
+    "NP",
+    "F",
+    "R",
+    "FR",
+
+    "N",
+    "NF",
+    "NR",
+    "NFR",
+
+    "M",
+    "MF",
+    "MR",
+    "MFR",
+}
 
 local function searchValues()
 
@@ -4293,12 +4369,12 @@ local function searchValues()
         return
     end
 
-    local q =
+    local query =
         normalize(
-            Search.Text
+            SearchBox.Text
         )
 
-    if q == "" then
+    if query == "" then
 
         ResultBox.Text =
             "Enter item name"
@@ -4309,24 +4385,29 @@ local function searchValues()
     local matches =
         {}
 
-    for slug, db in pairs(AMVGG.categories) do
+    for slug, database in pairs(
+        AMVGG.categories
+    ) do
 
-        for key, entry in pairs(db) do
+        for key, entry in pairs(database) do
 
             if
-                key == q
+                key == query
+
                 or key:find(
-                    q,
+                    query,
                     1,
                     true
                 )
             then
 
-                matches[
-                    #matches + 1
-                ] = {
+                matches[#matches + 1] = {
+
                     slug =
                         slug,
+
+                    key =
+                        key,
 
                     entry =
                         entry,
@@ -4343,21 +4424,22 @@ local function searchValues()
 
         ResultBox.Text =
             "NOT FOUND: "
-            .. Search.Text
+            .. SearchBox.Text
 
         return
     end
 
-    local exact
+    local exact =
+        nil
 
     for _, match in ipairs(matches) do
 
-        if
-            normalize(
+        local aliases =
+            buildAliases(
                 match.entry.name
             )
-            == q
-        then
+
+        if aliases[query] then
 
             exact =
                 match
@@ -4379,45 +4461,39 @@ local function searchValues()
             ),
 
             "CATEGORY = "
-            .. exact.slug,
+            .. tostring(
+                exact.slug
+            ),
+
+            "MODE = BASELESS EXACT",
 
             "",
         }
 
         if exact.slug == "pets" then
 
-            for _, v in ipairs({
-                "NP",
-                "F",
-                "R",
-                "FR",
-                "N",
-                "NF",
-                "NR",
-                "NFR",
-                "M",
-                "MF",
-                "MR",
-                "MFR",
-            }) do
+            for _, v in ipairs(
+                VARIANT_ORDER
+            ) do
 
-                local value,
-                    field,
-                    fallback =
-                    firstNumber(
-                        entry,
-                        PET_FIELDS[v]
+                local field =
+                    PET_VALUE_FIELD[
+                        v
+                    ]
+
+                local value =
+                    toNumber(
+                        entry[field]
                     )
 
-                lines[
-                    #lines + 1
-                ] =
+                lines[#lines + 1] =
                     string.format(
-                        "%-4s = %-10s [%s%s]",
+                        "%-4s = %-10s  [%s]",
                         v,
-                        tostring(value),
-                        tostring(field),
-                        fallback and " fallback" or ""
+                        value ~= nil
+                            and tostring(value)
+                            or "nil",
+                        field
                     )
             end
 
@@ -4425,31 +4501,23 @@ local function searchValues()
 
             local value,
                 field =
-                genericValue(
+                getGenericBaselessValue(
                     entry
                 )
 
-            lines[
-                #lines + 1
-            ] =
+            lines[#lines + 1] =
                 "VALUE = "
                 .. tostring(value)
 
-            lines[
-                #lines + 1
-            ] =
+            lines[#lines + 1] =
                 "FIELD = "
                 .. tostring(field)
         end
 
-        lines[
-            #lines + 1
-        ] =
+        lines[#lines + 1] =
             ""
 
-        lines[
-            #lines + 1
-        ] =
+        lines[#lines + 1] =
             "UPDATED = "
             .. tostring(
                 entry.lastUpdatedAt
@@ -4470,14 +4538,14 @@ local function searchValues()
 
     for _, match in ipairs(matches) do
 
-        names[
-            #names + 1
-        ] =
+        names[#names + 1] =
             tostring(
                 match.entry.name
             )
             .. " ["
-            .. match.slug
+            .. tostring(
+                match.slug
+            )
             .. "]"
     end
 
@@ -4496,17 +4564,18 @@ SearchButton.Activated:Connect(
     searchValues
 )
 
-Search.FocusLost:Connect(
-    function(enter)
+SearchBox.FocusLost:Connect(
+    function(enterPressed)
 
-        if enter then
+        if enterPressed then
+
             searchValues()
         end
     end
 )
 
 --============================================================
--- UPDATES
+-- UPDATES PAGE
 --============================================================
 
 local UpdatesPage =
@@ -4514,7 +4583,7 @@ local UpdatesPage =
         "UPDATES"
     )
 
-label(
+makeLabel(
     UpdatesPage,
 
     "Updates",
@@ -4537,26 +4606,27 @@ label(
 )
 
 local UpdatesText =
-    label(
+    makeLabel(
         UpdatesPage,
 
-        "V11.6.0\n\n"
-        .. "• Fixed Dark Choccybunny lookup\n"
-        .. "• Fixed duplicate RSC objects\n"
-        .. "• Added exact → same-tier fallback\n"
-        .. "• Added every AMVGG value category\n"
-        .. "• Added food / petwear / vehicles / toys / gifts\n"
-        .. "• Added detailed Values diagnostics\n\n"
-        .. "NEXT:\n"
-        .. "• Value change history\n"
-        .. "• New-item firstSeen cache\n"
-        .. "• 24h new-item protection",
+        "V11.6.1 BASELESS EXACT\n\n"
+        .. "• REMOVED all cross-variant value fallbacks\n"
+        .. "• M uses ONLY npMegaValue\n"
+        .. "• MF uses ONLY mfValue\n"
+        .. "• MR uses ONLY mrValue\n"
+        .. "• MFR uses ONLY megaValue\n"
+        .. "• Same exact rule for NP/F/R/FR and Neon variants\n"
+        .. "• Duplicate RSC objects still merged\n"
+        .. "• Dark Choccybunny aliases preserved\n"
+        .. "• All AMVGG categories preserved\n\n"
+        .. "If exact field = nil -> V ?\n"
+        .. "Wrong MFR/NFR price will NEVER be substituted.",
 
         UDim2.new(
             1,
             -44,
             0,
-            350
+            380
         ),
 
         UDim2.fromOffset(
@@ -4573,7 +4643,7 @@ UpdatesText.TextYAlignment =
     Enum.TextYAlignment.Top
 
 --============================================================
--- SETTINGS
+-- SETTINGS PAGE
 --============================================================
 
 local SettingsPage =
@@ -4581,7 +4651,7 @@ local SettingsPage =
         "SETTINGS"
     )
 
-label(
+makeLabel(
     SettingsPage,
 
     "Settings",
@@ -4604,23 +4674,24 @@ label(
 )
 
 local SettingsText =
-    label(
+    makeLabel(
         SettingsPage,
 
-        "TRADE SLOTS            18\n\n"
-        .. "PET VARIANTS          12\n\n"
+        "PRICE MODE             BASELESS\n\n"
+        .. "PET VALUE MODE         EXACT\n\n"
+        .. "CROSS VARIANT FALLBACK OFF\n\n"
+        .. "TRADE SLOTS            18\n\n"
+        .. "PET VARIANTS           12\n\n"
         .. "AMVGG CATEGORIES       10\n\n"
-        .. "EXACT VALUE FIRST      ON\n\n"
-        .. "SAME-TIER FALLBACK     ON\n\n"
         .. "FAIR RANGE             ±2%\n\n"
-        .. "UNKNOWN BLOCKS RESULT  ON\n\n"
+        .. "UNKNOWN BLOCK RESULT   ON\n\n"
         .. "AUTO ACCEPT            OFF",
 
         UDim2.new(
             1,
             -44,
             0,
-            300
+            340
         ),
 
         UDim2.fromOffset(
@@ -4640,7 +4711,7 @@ SettingsText.TextYAlignment =
 -- STATUS
 --============================================================
 
-local function updateStatus()
+local function updateAMVGGStatus()
 
     local text
     local color
@@ -4656,7 +4727,7 @@ local function updateStatus()
     elseif AMVGG.ready then
 
         text =
-            "AMVGG LIVE • P:"
+            "AMVGG BASELESS • P:"
             .. tostring(
                 AMVGG.counts.pets
                 or 0
@@ -4686,10 +4757,10 @@ local function updateStatus()
             C.YELLOW
     end
 
-    Status.Text =
+    AMVGGStatus.Text =
         text
 
-    Status.TextColor3 =
+    AMVGGStatus.TextColor3 =
         color
 
     ValuesStatus.Text =
@@ -4700,16 +4771,16 @@ local function updateStatus()
 end
 
 --============================================================
--- REFRESH
+-- REFRESH AMVGG
 --============================================================
 
-local function refresh()
+local function refreshAMVGG()
 
     if AMVGG.loading then
         return
     end
 
-    Status.Text =
+    AMVGGStatus.Text =
         "AMVGG: LOADING..."
 
     ValuesStatus.Text =
@@ -4720,11 +4791,20 @@ local function refresh()
         xpcall(
             function()
 
-                loadAllAMVGG()
+                local success =
+                    loadAllAMVGG()
+
+                if not success then
+
+                    error(
+                        AMVGG.error
+                        or "AMVGG LOAD FAILED"
+                    )
+                end
 
             end,
 
-            trace
+            safeTraceback
         )
 
     if not ok then
@@ -4741,9 +4821,9 @@ local function refresh()
         )
     end
 
-    updateStatus()
+    updateAMVGGStatus()
 
-    LastSignature =
+    LastTradeSignature =
         nil
 
     pcall(
@@ -4751,29 +4831,29 @@ local function refresh()
     )
 end
 
-Refresh.Activated:Connect(
+RefreshButton.Activated:Connect(
     function()
 
         task.spawn(
-            refresh
+            refreshAMVGG
         )
     end
 )
 
 --============================================================
--- AM FLOAT BUTTON
+-- FLOATING AM BUTTON
 --============================================================
 
-local Open =
+local OpenButton =
     Instance.new("TextButton")
 
-Open.Size =
+OpenButton.Size =
     UDim2.fromOffset(
         62,
         62
     )
 
-Open.Position =
+OpenButton.Position =
     UDim2.new(
         1,
         -78,
@@ -4781,64 +4861,216 @@ Open.Position =
         -31
     )
 
-Open.BackgroundColor3 =
+OpenButton.BackgroundColor3 =
     Color3.fromRGB(
         48,
         76,
         130
     )
 
-Open.BorderSizePixel =
+OpenButton.BorderSizePixel =
     0
 
-Open.Text =
+OpenButton.Text =
     "AM"
 
-Open.TextColor3 =
+OpenButton.TextColor3 =
     C.TEXT
 
-Open.Font =
+OpenButton.Font =
     Enum.Font.GothamBold
 
-Open.TextSize =
+OpenButton.TextSize =
     17
 
-Open.Visible =
+OpenButton.Visible =
     false
 
-Open.Parent =
+OpenButton.Parent =
     Gui
 
-corner(
-    Open,
+addCorner(
+    OpenButton,
     17
+)
+
+addStroke(
+    OpenButton,
+    0.1
+)
+
+--============================================================
+-- AM BUTTON DRAG
+--============================================================
+
+local openDragging =
+    false
+
+local openMoved =
+    false
+
+local openStart
+local openOrigin
+
+OpenButton.InputBegan:Connect(
+    function(input)
+
+        if
+            input.UserInputType
+            == Enum.UserInputType.Touch
+
+            or input.UserInputType
+            == Enum.UserInputType.MouseButton1
+        then
+
+            openDragging =
+                true
+
+            openMoved =
+                false
+
+            openStart =
+                input.Position
+
+            openOrigin =
+                OpenButton.Position
+        end
+    end
+)
+
+UIS.InputChanged:Connect(
+    function(input)
+
+        if not openDragging then
+            return
+        end
+
+        if
+            input.UserInputType
+            ~= Enum.UserInputType.Touch
+
+            and input.UserInputType
+            ~= Enum.UserInputType.MouseMovement
+        then
+
+            return
+        end
+
+        local camera =
+            workspace.CurrentCamera
+
+        if not camera then
+            return
+        end
+
+        local viewport =
+            camera.ViewportSize
+
+        local delta =
+            input.Position
+            - openStart
+
+        if
+            math.abs(delta.X) > 6
+            or math.abs(delta.Y) > 6
+        then
+
+            openMoved =
+                true
+        end
+
+        local x =
+            openOrigin.X.Scale
+            * viewport.X
+            + openOrigin.X.Offset
+            + delta.X
+
+        local y =
+            openOrigin.Y.Scale
+            * viewport.Y
+            + openOrigin.Y.Offset
+            + delta.Y
+
+        x =
+            math.clamp(
+                x,
+                0,
+                math.max(
+                    0,
+                    viewport.X
+                    - OpenButton.AbsoluteSize.X
+                )
+            )
+
+        y =
+            math.clamp(
+                y,
+                0,
+                math.max(
+                    0,
+                    viewport.Y
+                    - OpenButton.AbsoluteSize.Y
+                )
+            )
+
+        OpenButton.Position =
+            UDim2.fromOffset(
+                x,
+                y
+            )
+    end
+)
+
+UIS.InputEnded:Connect(
+    function(input)
+
+        if
+            input.UserInputType
+            == Enum.UserInputType.Touch
+
+            or input.UserInputType
+            == Enum.UserInputType.MouseButton1
+        then
+
+            openDragging =
+                false
+        end
+    end
 )
 
 --============================================================
 -- HIDE / OPEN
 --============================================================
 
-Close.Activated:Connect(
+CloseButton.Activated:Connect(
     function()
 
         Main.Visible =
             false
 
-        Open.Visible =
+        OpenButton.Visible =
             true
     end
 )
 
-Open.Activated:Connect(
+OpenButton.Activated:Connect(
     function()
+
+        if openMoved then
+
+            openMoved =
+                false
+
+            return
+        end
 
         Main.Visible =
             true
 
-        Open.Visible =
+        OpenButton.Visible =
             false
 
-        LastSignature =
+        LastTradeSignature =
             nil
 
         pcall(
@@ -4851,29 +5083,40 @@ Open.Activated:Connect(
 -- START
 --============================================================
 
-boot(
+setBoot(
     "7/8",
-    "Starting live systems"
+    "STARTING LIVE SYSTEMS"
 )
 
 setPage(
     "TRADE"
 )
 
-updateStatus()
+updateAMVGGStatus()
 
 pcall(
     updateTrade
 )
 
+-- Trade loop
 task.spawn(
     function()
 
         while Gui.Parent do
 
-            pcall(
-                updateTrade
-            )
+            local ok,
+                err =
+                pcall(
+                    updateTrade
+                )
+
+            if not ok then
+
+                warn(
+                    "[AM TRADE ERROR]",
+                    err
+                )
+            end
 
             task.wait(
                 0.65
@@ -4882,13 +5125,14 @@ task.spawn(
     end
 )
 
+-- Status loop
 task.spawn(
     function()
 
         while Gui.Parent do
 
             pcall(
-                updateStatus
+                updateAMVGGStatus
             )
 
             task.wait(
@@ -4898,7 +5142,7 @@ task.spawn(
     end
 )
 
--- AMVGG refresh every 15 minutes
+-- AMVGG initial + every 15 minutes
 task.spawn(
     function()
 
@@ -4908,7 +5152,7 @@ task.spawn(
 
         while Gui.Parent do
 
-            refresh()
+            refreshAMVGG()
 
             task.wait(
                 15 * 60
@@ -4917,13 +5161,17 @@ task.spawn(
     end
 )
 
-boot(
+--============================================================
+-- READY
+--============================================================
+
+setBoot(
     "8/8",
-    "READY"
+    "READY - BASELESS EXACT"
 )
 
 print(
-    "[AM V11.6.0] READY"
+    "[AM V11.6.1] READY - BASELESS EXACT"
 )
 
 task.delay(
