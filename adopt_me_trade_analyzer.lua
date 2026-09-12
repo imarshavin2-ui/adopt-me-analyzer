@@ -1,6 +1,40 @@
 repeat task.wait() until game:IsLoaded()
 
 --============================================================
+-- ADOPT ME TRADE ANALYZER V11.7.4
+-- FULL MONOLITHIC BUILD
+--
+-- PAGES:
+--   TRADE
+--   VALUES
+--   UPDATES
+--   SETTINGS
+--   TEST
+--
+-- TEST:
+--   TEST AUTO ACCEPT
+--   AUTO TRADE
+--
+-- AUTO TRADE:
+--   random player
+--   trade request
+--   highest safe item as showcase
+--   wait for their items
+--   calculate AMVGG
+--   NEW <24H = 0
+--   UNKNOWN = BLOCK
+--   optimize our side to MIN PROFIT cap
+--   >= MIN PROFIT = ACCEPT
+--   ask add
+--   wait 40 sec
+--   decline if still bad
+--   recheck after ACCEPT
+--   recheck before CONFIRM
+--   post-trade inventory rescan
+--============================================================
+
+
+--============================================================
 -- SERVICES
 --============================================================
 
@@ -36,13 +70,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.3"
+    "11.7.4"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1173"
+    "AdoptMeTradeAnalyzerV1174"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1173"
+    "AM_ANALYZER_BOOT_V1174"
 
 
 print(
@@ -93,6 +127,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1171",
     "AdoptMeTradeAnalyzerV1172",
     "AdoptMeTradeAnalyzerV1173",
+    "AdoptMeTradeAnalyzerV1174",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -102,6 +137,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1171",
     "AM_ANALYZER_BOOT_V1172",
     "AM_ANALYZER_BOOT_V1173",
+    "AM_ANALYZER_BOOT_V1174",
 }
 
 
@@ -2581,6 +2617,26 @@ local Settings = {
     optimizerBeam =
         350,
 
+    -- Delay between every add/remove action in our offer.
+    -- This prevents the bot from dumping many units into the trade at once.
+    itemActionDelay =
+        0.85,
+
+    -- Extra wait after the chosen offer has been fully rebuilt.
+    postRebuildDelay =
+        1.25,
+
+    -- Countdown after the final offer is stable before ACCEPT.
+    preAcceptDelay =
+        4,
+
+    -- Many low/mid pets on AMVGG do not expose an exact NP/R/F field and
+    -- fall back to our variant estimate. Allow those estimates only for
+    -- OUR pets so the optimizer can actually use pets. Incoming estimated
+    -- values can still be blocked by BLOCK ESTIMATED VALUES.
+    allowEstimatedOwnPets =
+        true,
+
     blockEstimated =
         true,
 }
@@ -3314,7 +3370,19 @@ end
 -- EVALUATE OFFER
 --============================================================
 
-local function evaluateOffer(offer)
+local function evaluateOffer(
+    offer,
+    options
+)
+
+    options =
+        type(options) == "table"
+        and options
+        or {}
+
+    local allowEstimated =
+        options.allowEstimated
+        == true
 
     local result = {
 
@@ -3401,7 +3469,8 @@ local function evaluateOffer(offer)
                     data.name
 
                 if
-                    not Settings.blockEstimated
+                    allowEstimated
+                    or not Settings.blockEstimated
                 then
 
                     result.total =
@@ -3431,7 +3500,6 @@ local function evaluateOffer(offer)
 
     return result
 end
-
 
 local function profitPercent(
     mine,
@@ -4052,10 +4120,27 @@ local function valuedInventory()
                 item
             )
 
+        local isPet =
+            tostring(
+                item.category
+                or ""
+            )
+            == "pets"
+
+        local estimatedAllowed =
+            data.estimated
+            and isPet
+            and Settings.allowEstimatedOwnPets
+                == true
+
         if
             data.known
             and not data.newIgnored
-            and not data.estimated
+            and (
+                not data.estimated
+                or estimatedAllowed
+                or not Settings.blockEstimated
+            )
             and data.value > 0
             and isAllowed(
                 data.name
@@ -4084,6 +4169,19 @@ local function valuedInventory()
                         item
                     ),
 
+                category =
+                    tostring(
+                        item.category
+                        or "unknown"
+                    ),
+
+                isPet =
+                    isPet,
+
+                estimated =
+                    data.estimated
+                    == true,
+
                 value =
                     data.value,
             }
@@ -4094,6 +4192,16 @@ local function valuedInventory()
         result,
         function(a, b)
 
+            if
+                math.abs(
+                    a.value - b.value
+                )
+                < 0.000000001
+                and a.isPet ~= b.isPet
+            then
+                return a.isPet
+            end
+
             return
                 a.value
                 > b.value
@@ -4102,7 +4210,6 @@ local function valuedInventory()
 
     return result
 end
-
 
 --============================================================
 -- OPTIMIZER
@@ -4182,6 +4289,9 @@ local function optimizeOurOffer(
 
         {
             total =
+                0,
+
+            petCount =
                 0,
 
             list =
@@ -4272,6 +4382,17 @@ local function optimizeOurOffer(
                         total =
                             total,
 
+                        petCount =
+                            (
+                                state.petCount
+                                or 0
+                            )
+                            + (
+                                candidate.isPet
+                                and 1
+                                or 0
+                            ),
+
                         list =
                             list,
                     }
@@ -4282,6 +4403,31 @@ local function optimizeOurOffer(
         table.sort(
             expanded,
             function(a, b)
+
+                if
+                    math.abs(
+                        a.total - b.total
+                    )
+                    < 0.000000001
+                    and (
+                        a.petCount
+                        or 0
+                    )
+                    ~= (
+                        b.petCount
+                        or 0
+                    )
+                then
+                    return
+                        (
+                            a.petCount
+                            or 0
+                        )
+                        > (
+                            b.petCount
+                            or 0
+                        )
+                end
 
                 return
                     a.total
@@ -4441,6 +4587,16 @@ local function rebuildOurOffer(
             true
     end
 
+    local actionDelay =
+        math.max(
+            0.1,
+            tonumber(
+                Settings.itemActionDelay
+            )
+            or 0.85
+        )
+
+    -- Remove slowly first.
     for _,
         item in pairs(
             getOfferItems(
@@ -4463,17 +4619,30 @@ local function rebuildOurOffer(
 
             if not wanted[uid] then
 
-                removeOurItem(
-                    uid
+                task.wait(
+                    actionDelay
                 )
 
-                task.wait(
-                    0.18
+                removeOurItem(
+                    uid
                 )
             end
         end
     end
 
+    -- Let the client receive removals before additions.
+    task.wait(
+        math.max(
+            0.25,
+            tonumber(
+                Settings.postRebuildDelay
+            )
+            or 1.25
+        )
+        * 0.5
+    )
+
+    -- Add every selected unit one by one, with a visible delay.
     for _,
         candidate in ipairs(
             desired
@@ -4486,17 +4655,28 @@ local function rebuildOurOffer(
             ]
         then
 
+            task.wait(
+                actionDelay
+            )
+
             addOurItem(
                 candidate.uid
             )
-
-            task.wait(
-                0.18
-            )
         end
     end
-end
 
+    task.wait(
+        math.max(
+            0.25,
+            tonumber(
+                Settings.postRebuildDelay
+            )
+            or 1.25
+        )
+    )
+
+    return true
+end
 
 --============================================================
 -- CHAT
@@ -5828,7 +6008,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1120
+        1320
     )
 
 TestCanvas.BackgroundTransparency =
@@ -6035,6 +6215,62 @@ Connect(
 renderTestEstimated()
 
 
+local AllowEstimatedOwnPetsToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.new(
+            1,
+            -24,
+            0,
+            34
+        ),
+
+        UDim2.fromOffset(
+            10,
+            166
+        )
+    )
+
+
+local function renderAllowEstimatedOwnPets()
+
+    AllowEstimatedOwnPetsToggle.Text =
+        "USE ESTIMATED OWN PETS: "
+        .. (
+            Settings.allowEstimatedOwnPets
+            and "ON"
+            or "OFF"
+        )
+
+    AllowEstimatedOwnPetsToggle.BackgroundColor3 =
+        Settings.allowEstimatedOwnPets
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+end
+
+
+AllowEstimatedOwnPetsToggle.Activated:
+Connect(
+    function()
+
+        Settings.allowEstimatedOwnPets =
+            not Settings.allowEstimatedOwnPets
+
+        saveSettings()
+        renderAllowEstimatedOwnPets()
+    end
+)
+
+
+renderAllowEstimatedOwnPets()
+
+
 local function settingInput(
     title,
     value,
@@ -6083,7 +6319,7 @@ local ProfitInput =
     settingInput(
         "MIN PROFIT %",
         Settings.minProfitPercent,
-        178
+        208
     )
 
 
@@ -6091,7 +6327,7 @@ local AddTimeoutInput =
     settingInput(
         "ADD TIMEOUT",
         Settings.addTimeout,
-        216
+        246
     )
 
 
@@ -6099,7 +6335,7 @@ local FirstTimeoutInput =
     settingInput(
         "FIRST ITEM TIMEOUT",
         Settings.firstItemTimeout,
-        254
+        284
     )
 
 
@@ -6107,7 +6343,7 @@ local RequestTimeoutInput =
     settingInput(
         "REQUEST TIMEOUT",
         Settings.requestTimeout,
-        292
+        322
     )
 
 
@@ -6115,7 +6351,7 @@ local CooldownInput =
     settingInput(
         "PLAYER COOLDOWN",
         Settings.playerCooldown,
-        330
+        360
     )
 
 
@@ -6123,7 +6359,31 @@ local NewHoursInput =
     settingInput(
         "NEW ITEM HOURS",
         Settings.newItemHours,
-        368
+        398
+    )
+
+
+local ItemActionDelayInput =
+    settingInput(
+        "ITEM ACTION DELAY",
+        Settings.itemActionDelay,
+        436
+    )
+
+
+local PreAcceptDelayInput =
+    settingInput(
+        "PRE ACCEPT DELAY",
+        Settings.preAcceptDelay,
+        474
+    )
+
+
+local PostRebuildDelayInput =
+    settingInput(
+        "POST REBUILD WAIT",
+        Settings.postRebuildDelay,
+        512
     )
 
 
@@ -6219,6 +6479,30 @@ bindNumber(
 )
 
 
+bindNumber(
+    ItemActionDelayInput,
+    "itemActionDelay",
+    0.1,
+    5
+)
+
+
+bindNumber(
+    PreAcceptDelayInput,
+    "preAcceptDelay",
+    0,
+    20
+)
+
+
+bindNumber(
+    PostRebuildDelayInput,
+    "postRebuildDelay",
+    0.25,
+    10
+)
+
+
 label(
     TestCanvas,
     "ALLOWED ITEMS • blank = all",
@@ -6230,7 +6514,7 @@ label(
 
     UDim2.fromOffset(
         12,
-        413
+        557
     ),
 
     Enum.Font.GothamBold,
@@ -6256,7 +6540,7 @@ local AllowedInput =
 
         UDim2.fromOffset(
             12,
-            439
+            583
         )
     )
 
@@ -6294,7 +6578,7 @@ local ChatToggle =
 
         UDim2.fromOffset(
             10,
-            511
+            655
         )
     )
 
@@ -6313,7 +6597,7 @@ local ScanInventory =
 
         UDim2.fromOffset(
             10,
-            555
+            699
         )
     )
 
@@ -6413,7 +6697,7 @@ local LogBox =
 
         UDim2.fromOffset(
             12,
-            607
+            751
         )
     )
 
@@ -6489,12 +6773,18 @@ local function scanInventoryAndLog(reason)
         testLog(
             "#"
             .. i,
+            item.isPet
+            and "[PET]"
+            or "[ITEM]",
             item.name,
             item.variant,
             "=",
             valueText(
                 item.value
-            )
+            ),
+            item.estimated
+            and "(EST)"
+            or ""
         )
     end
 
@@ -6565,6 +6855,15 @@ local State = {
     acceptedSignature =
         nil,
 
+    acceptReadySignature =
+        nil,
+
+    acceptReadySince =
+        nil,
+
+    evaluationLoggedSignature =
+        nil,
+
     optimizedSignature =
         nil,
 
@@ -6613,6 +6912,15 @@ local function resetState()
         nil
 
     State.acceptedSignature =
+        nil
+
+    State.acceptReadySignature =
+        nil
+
+    State.acceptReadySince =
+        nil
+
+    State.evaluationLoggedSignature =
         nil
 
     State.optimizedSignature =
@@ -6824,7 +7132,12 @@ local function evaluateTrade(
 
     local mine =
         evaluateOffer(
-            myOffer
+            myOffer,
+            {
+                allowEstimated =
+                    Settings.allowEstimatedOwnPets
+                    == true,
+            }
         )
 
     local theirs =
@@ -6870,8 +7183,11 @@ local function evaluateTrade(
     if
         Settings.blockEstimated
         and (
-            mine.estimated > 0
-            or theirs.estimated > 0
+            theirs.estimated > 0
+            or (
+                mine.estimated > 0
+                and not Settings.allowEstimatedOwnPets
+            )
         )
     then
 
@@ -7395,6 +7711,15 @@ local function manageAutoTrade(trade)
         State.changedAt =
             os.clock()
 
+        State.acceptReadySignature =
+            nil
+
+        State.acceptReadySince =
+            nil
+
+        State.evaluationLoggedSignature =
+            nil
+
         State.optimizedSignature =
             nil
     end
@@ -7525,6 +7850,90 @@ local function manageAutoTrade(trade)
         )
     end
 
+    if
+        State.evaluationLoggedSignature
+        ~= signature
+    then
+
+        State.evaluationLoggedSignature =
+            signature
+
+        testLog(
+            "WFL CHECK",
+            "OURS=",
+            valueText(
+                evaluation.mine.total
+            ),
+            "THEM=",
+            valueText(
+                evaluation.theirs.total
+            ),
+            "PROFIT=",
+            evaluation.profit
+            and string.format(
+                "%.2f%%",
+                evaluation.profit
+            )
+            or "?"
+        )
+
+        for _, row in ipairs(
+            evaluation.mine.items
+        ) do
+            testLog(
+                "  OUR",
+                row.data.name,
+                getVariant(
+                    row.raw
+                ),
+                "=",
+                valueText(
+                    row.data.value
+                ),
+                row.data.estimated
+                and "(EST)"
+                or "",
+                row.data.analysis
+                and row.data.analysis.field
+                and (
+                    "FIELD="
+                    .. tostring(
+                        row.data.analysis.field
+                    )
+                )
+                or ""
+            )
+        end
+
+        for _, row in ipairs(
+            evaluation.theirs.items
+        ) do
+            testLog(
+                "  THEIR",
+                row.data.name,
+                getVariant(
+                    row.raw
+                ),
+                "=",
+                valueText(
+                    row.data.value
+                ),
+                row.data.estimated
+                and "(EST)"
+                or "",
+                row.data.analysis
+                and row.data.analysis.field
+                and (
+                    "FIELD="
+                    .. tostring(
+                        row.data.analysis.field
+                    )
+                )
+                or ""
+            )
+        end
+    end
+
     -- ALWAYS OPTIMIZE OUR SIDE BEFORE ACCEPT
     -- Their offer stays fixed; choose the most valuable combination
     -- from our inventory that still keeps MIN PROFIT.
@@ -7577,10 +7986,39 @@ local function manageAutoTrade(trade)
                 .. "%"
             )
 
+            for index,
+                candidate in ipairs(
+                    desired
+                )
+            do
+                testLog(
+                    "PICK #"
+                    .. index,
+                    candidate.isPet
+                    and "[PET]"
+                    or "[ITEM]",
+                    candidate.name,
+                    candidate.variant,
+                    "=",
+                    valueText(
+                        candidate.value
+                    ),
+                    candidate.estimated
+                    and "(EST)"
+                    or ""
+                )
+            end
+
             rebuildOurOffer(
                 myOffer,
                 desired
             )
+
+            State.acceptReadySignature =
+                nil
+
+            State.acceptReadySince =
+                nil
 
             State.changedAt =
                 os.clock()
@@ -7590,15 +8028,105 @@ local function manageAutoTrade(trade)
     end
 
     -- ACCEPT ONLY AFTER OUR OFFER WAS BALANCED
+    -- and remained unchanged for PRE ACCEPT DELAY seconds.
     if evaluation.valid then
 
         State.askStarted =
             nil
 
+        local finalSignature =
+            fullSignature(
+                myOffer,
+                theirOffer
+            )
+
+        if
+            State.acceptReadySignature
+            ~= finalSignature
+        then
+
+            State.acceptReadySignature =
+                finalSignature
+
+            State.acceptReadySince =
+                os.clock()
+
+            testLog(
+                "PRE ACCEPT CHECK START",
+                string.format(
+                    "+%.2f%%",
+                    evaluation.profit
+                )
+            )
+        end
+
+        local requiredDelay =
+            math.max(
+                0,
+                tonumber(
+                    Settings.preAcceptDelay
+                )
+                or 4
+            )
+
+        local waited =
+            os.clock()
+            - (
+                State.acceptReadySince
+                or os.clock()
+            )
+
+        local remaining =
+            requiredDelay
+            - waited
+
+        if remaining > 0 then
+
+            setTestStatus(
+                string.format(
+                    "WIN +%.2f%% • ACCEPT IN %.1fs",
+                    evaluation.profit,
+                    remaining
+                ),
+                C.GREEN
+            )
+
+            return
+        end
+
+        -- One more complete calculation immediately before ACCEPT.
+        local finalCheck =
+            evaluateTrade(
+                myOffer,
+                theirOffer
+            )
+
+        if
+            finalCheck.blocked
+            or not finalCheck.valid
+        then
+
+            State.acceptReadySignature =
+                nil
+
+            State.acceptReadySince =
+                nil
+
+            unaccept(
+                myOffer
+            )
+
+            testLog(
+                "PRE ACCEPT RECHECK FAILED"
+            )
+
+            return
+        end
+
         setTestStatus(
             string.format(
                 "WIN +%.2f%%",
-                evaluation.profit
+                finalCheck.profit
             ),
             C.GREEN
         )
