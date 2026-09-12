@@ -1,5 +1,8 @@
 repeat task.wait() until game:IsLoaded()
 
+--============================================================
+-- SERVICES
+--============================================================
 
 local Players =
     game:GetService("Players")
@@ -33,13 +36,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.2"
+    "11.7.3"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1172"
+    "AdoptMeTradeAnalyzerV1173"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1172"
+    "AM_ANALYZER_BOOT_V1173"
 
 
 print(
@@ -89,6 +92,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1170",
     "AdoptMeTradeAnalyzerV1171",
     "AdoptMeTradeAnalyzerV1172",
+    "AdoptMeTradeAnalyzerV1173",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -97,6 +101,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1170",
     "AM_ANALYZER_BOOT_V1171",
     "AM_ANALYZER_BOOT_V1172",
+    "AM_ANALYZER_BOOT_V1173",
 }
 
 
@@ -6449,6 +6454,71 @@ local function setTestStatus(
 end
 
 
+local function scanInventoryAndLog(reason)
+
+    local raw =
+        inventoryItems()
+
+    local list =
+        valuedInventory()
+
+    local prefix =
+        tostring(
+            reason
+            or "MANUAL SCAN"
+        )
+
+    testLog(
+        prefix,
+        "ALL UNLOCKED =",
+        #raw,
+        "SAFE =",
+        #list
+    )
+
+    for i = 1,
+        math.min(
+            #list,
+            15
+        )
+    do
+
+        local item =
+            list[i]
+
+        testLog(
+            "#"
+            .. i,
+            item.name,
+            item.variant,
+            "=",
+            valueText(
+                item.value
+            )
+        )
+    end
+
+    if list[1] then
+
+        testLog(
+            "BEST / SHOWCASE =",
+            list[1].name,
+            list[1].variant,
+            valueText(
+                list[1].value
+            )
+        )
+    else
+
+        testLog(
+            "BEST / SHOWCASE = NONE"
+        )
+    end
+
+    return list
+end
+
+
 ScanInventory.Activated:
 Connect(
     function()
@@ -6456,46 +6526,9 @@ Connect(
         task.spawn(
             function()
 
-                local list =
-                    valuedInventory()
-
-                testLog(
-                    "SAFE INVENTORY =",
-                    #list
+                scanInventoryAndLog(
+                    "MANUAL SCAN"
                 )
-
-                for i = 1,
-                    math.min(
-                        #list,
-                        15
-                    )
-                do
-
-                    local item =
-                        list[i]
-
-                    testLog(
-                        "#"
-                        .. i,
-                        item.name,
-                        item.variant,
-                        "=",
-                        valueText(
-                            item.value
-                        )
-                    )
-                end
-
-                if list[1] then
-
-                    testLog(
-                        "SHOWCASE =",
-                        list[1].name,
-                        valueText(
-                            list[1].value
-                        )
-                    )
-                end
             end
         )
     end
@@ -7492,34 +7525,9 @@ local function manageAutoTrade(trade)
         )
     end
 
-    -- ALREADY WIN
-    if evaluation.valid then
-
-        State.askStarted =
-            nil
-
-        setTestStatus(
-            string.format(
-                "WIN +%.2f%%",
-                evaluation.profit
-            ),
-            C.GREEN
-        )
-
-        secureAccept(
-            trade,
-            myOffer,
-            theirOffer
-        )
-
-        return
-    end
-
-    unaccept(
-        myOffer
-    )
-
-    -- OPTIMIZE OUR SIDE
+    -- ALWAYS OPTIMIZE OUR SIDE BEFORE ACCEPT
+    -- Their offer stays fixed; choose the most valuable combination
+    -- from our inventory that still keeps MIN PROFIT.
     local theirSignature =
         offerSignature(
             theirOffer
@@ -7546,7 +7554,7 @@ local function manageAutoTrade(trade)
         then
 
             testLog(
-                "OPTIMIZE",
+                "BALANCE TO MIN PROFIT",
                 "THEM=",
                 valueText(
                     evaluation.theirs.total
@@ -7558,7 +7566,15 @@ local function manageAutoTrade(trade)
                 "OURS=",
                 valueText(
                     ourValue
+                ),
+                "TARGET=+"
+                .. valueText(
+                    tonumber(
+                        Settings.minProfitPercent
+                    )
+                    or 10
                 )
+                .. "%"
             )
 
             rebuildOurOffer(
@@ -7572,6 +7588,33 @@ local function manageAutoTrade(trade)
             return
         end
     end
+
+    -- ACCEPT ONLY AFTER OUR OFFER WAS BALANCED
+    if evaluation.valid then
+
+        State.askStarted =
+            nil
+
+        setTestStatus(
+            string.format(
+                "WIN +%.2f%%",
+                evaluation.profit
+            ),
+            C.GREEN
+        )
+
+        secureAccept(
+            trade,
+            myOffer,
+            theirOffer
+        )
+
+        return
+    end
+
+    unaccept(
+        myOffer
+    )
 
     -- ASK ADD
     if
@@ -7649,18 +7692,42 @@ local function runAutoTrade()
 
     if State.tradeID then
 
+        local endedPartner =
+            State.partner
+
         if
             typeof(
-                State.partner
+                endedPartner
             ) == "Instance"
         then
 
             cooldown(
-                State.partner
+                endedPartner
             )
         end
 
+        setTestStatus(
+            "POST-TRADE RESCAN",
+            C.YELLOW
+        )
+
+        testLog(
+            "TRADE ENDED -> RESCAN INVENTORY"
+        )
+
+        -- Give ClientData a moment to receive the completed trade result.
+        task.wait(
+            1.25
+        )
+
+        scanInventoryAndLog(
+            "POST TRADE SCAN"
+        )
+
         resetState()
+
+        -- Do not instantly send another request in the same cycle.
+        return
     end
 
     if
