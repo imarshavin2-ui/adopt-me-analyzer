@@ -69,13 +69,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.0"
+    "11.7.1"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1170"
+    "AdoptMeTradeAnalyzerV1171"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1170"
+    "AM_ANALYZER_BOOT_V1171"
 
 
 print(
@@ -123,12 +123,14 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1161",
     "AdoptMeTradeAnalyzerV1162",
     "AdoptMeTradeAnalyzerV1170",
+    "AdoptMeTradeAnalyzerV1171",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
     "AM_ANALYZER_BOOT_V1161",
     "AM_ANALYZER_BOOT_V1162",
     "AM_ANALYZER_BOOT_V1170",
+    "AM_ANALYZER_BOOT_V1171",
 }
 
 
@@ -5854,7 +5856,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        850
+        940
     )
 
 TestCanvas.BackgroundTransparency =
@@ -5869,8 +5871,10 @@ local TestToggle =
         TestCanvas,
         "",
 
-        UDim2.fromOffset(
-            180,
+        UDim2.new(
+            1,
+            -24,
+            0,
             36
         ),
 
@@ -5886,14 +5890,16 @@ local AutoToggle =
         TestCanvas,
         "",
 
-        UDim2.fromOffset(
-            180,
+        UDim2.new(
+            1,
+            -24,
+            0,
             36
         ),
 
         UDim2.fromOffset(
-            200,
-            10
+            10,
+            54
         )
     )
 
@@ -6023,7 +6029,7 @@ local ProfitInput =
     settingInput(
         "MIN PROFIT %",
         Settings.minProfitPercent,
-        65
+        108
     )
 
 
@@ -6031,7 +6037,7 @@ local AddTimeoutInput =
     settingInput(
         "ADD TIMEOUT",
         Settings.addTimeout,
-        103
+        146
     )
 
 
@@ -6039,7 +6045,7 @@ local FirstTimeoutInput =
     settingInput(
         "FIRST ITEM TIMEOUT",
         Settings.firstItemTimeout,
-        141
+        184
     )
 
 
@@ -6047,7 +6053,7 @@ local RequestTimeoutInput =
     settingInput(
         "REQUEST TIMEOUT",
         Settings.requestTimeout,
-        179
+        222
     )
 
 
@@ -6055,7 +6061,7 @@ local CooldownInput =
     settingInput(
         "PLAYER COOLDOWN",
         Settings.playerCooldown,
-        217
+        260
     )
 
 
@@ -6063,7 +6069,7 @@ local NewHoursInput =
     settingInput(
         "NEW ITEM HOURS",
         Settings.newItemHours,
-        255
+        298
     )
 
 
@@ -6170,7 +6176,7 @@ label(
 
     UDim2.fromOffset(
         12,
-        300
+        343
     ),
 
     Enum.Font.GothamBold,
@@ -6196,7 +6202,7 @@ local AllowedInput =
 
         UDim2.fromOffset(
             12,
-            326
+            369
         )
     )
 
@@ -6225,14 +6231,16 @@ local ChatToggle =
         TestCanvas,
         "",
 
-        UDim2.fromOffset(
-            180,
+        UDim2.new(
+            1,
+            -24,
+            0,
             36
         ),
 
         UDim2.fromOffset(
             10,
-            398
+            441
         )
     )
 
@@ -6242,14 +6250,16 @@ local ScanInventory =
         TestCanvas,
         "SCAN INVENTORY",
 
-        UDim2.fromOffset(
-            180,
+        UDim2.new(
+            1,
+            -24,
+            0,
             36
         ),
 
         UDim2.fromOffset(
-            200,
-            398
+            10,
+            485
         )
     )
 
@@ -6349,7 +6359,7 @@ local LogBox =
 
         UDim2.fromOffset(
             12,
-            455
+            535
         )
     )
 
