@@ -1,240 +1,2763 @@
+repeat task.wait() until game:IsLoaded()
+
 --============================================================
--- ADOPT ME TRADE ANALYZER
--- TEST / AUTO TRADE MODULE V11.7.0
+-- ADOPT ME TRADE ANALYZER V11.7.0
+-- FULL MONOLITHIC BUILD
 --
--- PASTE AT THE VERY END OF V11.6.2
+-- PAGES:
+--   TRADE
+--   VALUES
+--   UPDATES
+--   SETTINGS
+--   TEST
 --
--- REQUIRES EXISTING V11.6.2:
--- ClientData
--- Fsys
--- AMVGG
--- analyzeItem()
--- findAMVGG()
--- normalize()
--- getVariant()
--- isMe()
--- playerName()
--- refresh()
--- createPage()
--- nav()
--- label()
--- button()
--- corner()
--- C
--- Gui
--- RS
--- HttpService
--- LocalPlayer
+-- TEST:
+--   TEST AUTO ACCEPT
+--   AUTO TRADE
 --
+-- AUTO TRADE:
+--   random player
+--   trade request
+--   highest safe item as showcase
+--   wait for their items
+--   calculate AMVGG
+--   NEW <24H = 0
+--   UNKNOWN = BLOCK
+--   >= +10% = ACCEPT
+--   otherwise optimize our side
+--   ask add
+--   wait 40 sec
+--   decline if still bad
+--   recheck after ACCEPT
+--   recheck before CONFIRM
 --============================================================
 
-print("[AM TEST V11.7.0] LOADING")
+
+--============================================================
+-- SERVICES
+--============================================================
+
+local Players =
+    game:GetService("Players")
+
+local RS =
+    game:GetService("ReplicatedStorage")
+
+local HttpService =
+    game:GetService("HttpService")
+
+local UIS =
+    game:GetService("UserInputService")
 
 local TextChatService =
     game:GetService("TextChatService")
 
---============================================================
--- SETTINGS
---============================================================
+local LocalPlayer =
+    Players.LocalPlayer
 
-local TEST_SETTINGS_FILE =
-    "am_test_auto_trade_v117.json"
+local PlayerGui =
+    LocalPlayer:WaitForChild("PlayerGui")
 
-local FIRST_SEEN_FILE =
-    "am_amvgg_first_seen_v117.json"
+local ENV =
+    type(getgenv) == "function"
+    and getgenv()
+    or _G
 
-local TestSettings = {
-
-    -- Manual trade tester
-    testAutoAccept = false,
-
-    -- Full random-player automation
-    autoTrade = false,
-
-    -- Required minimum profit
-    minProfitPercent = 10,
-
-    -- How long we let trade stop changing
-    settleSeconds = 2,
-
-    -- Wait for other player to add after showcase
-    firstItemTimeout = 25,
-
-    -- After asking for add
-    addTimeout = 40,
-
-    -- Trade request timeout
-    requestTimeout = 15,
-
-    -- Don't spam same player
-    playerCooldown = 300,
-
-    -- AMVGG refresh
-    refreshMinutes = 5,
-
-    -- Newly detected AMVGG item
-    newItemHours = 24,
-
-    -- Blank = all known inventory items
-    allowedItems = "",
-
-    -- Chat request if Roblox allows it.
-    chatRequests = true,
-
-    -- Max number of our final items
-    maxOurItems = 18,
-
-    -- Beam search accuracy
-    optimizerBeam = 300,
-
-    -- Overall negotiation cap
-    maxTradeSeconds = 120,
-}
 
 --============================================================
--- FILE SETTINGS
+-- VERSION
 --============================================================
 
-local function loadJSONFile(path)
+local VERSION =
+    "11.7.0"
 
-    if
-        type(readfile) ~= "function"
-        or type(isfile) ~= "function"
-    then
-        return nil
-    end
+local GUI_NAME =
+    "AdoptMeTradeAnalyzerV1170"
 
-    local okExists, exists =
+local BOOT_NAME =
+    "AM_ANALYZER_BOOT_V1170"
+
+
+print(
+    "[AM V" .. VERSION .. "] BOOT"
+)
+
+
+--============================================================
+-- GUI PARENT
+--============================================================
+
+local GuiParent =
+    PlayerGui
+
+if type(gethui) == "function" then
+
+    local ok,
+        hui =
         pcall(
-            isfile,
-            path
+            gethui
         )
 
-    if not okExists or not exists then
+    if ok and hui then
+        GuiParent = hui
+    end
+end
+
+
+--============================================================
+-- REMOVE OLD GUI
+--============================================================
+
+local OLD_GUI_NAMES = {
+
+    "AdoptMeTradeAnalyzerV11",
+    "AdoptMeTradeAnalyzerV111",
+    "AdoptMeTradeAnalyzerV112",
+    "AdoptMeTradeAnalyzerV113",
+    "AdoptMeTradeAnalyzerV114",
+    "AdoptMeTradeAnalyzerV115",
+    "AdoptMeTradeAnalyzerV1151",
+    "AdoptMeTradeAnalyzerV1152",
+    "AdoptMeTradeAnalyzerV1153",
+    "AdoptMeTradeAnalyzerV1160",
+    "AdoptMeTradeAnalyzerV1161",
+    "AdoptMeTradeAnalyzerV1162",
+    "AdoptMeTradeAnalyzerV1170",
+
+    "AM_ANALYZER_BOOT_V1153",
+    "AM_ANALYZER_BOOT_V1160",
+    "AM_ANALYZER_BOOT_V1161",
+    "AM_ANALYZER_BOOT_V1162",
+    "AM_ANALYZER_BOOT_V1170",
+}
+
+
+for _,
+    name in ipairs(
+        OLD_GUI_NAMES
+    )
+do
+
+    local object =
+        GuiParent:
+        FindFirstChild(
+            name
+        )
+
+    if object then
+        object:Destroy()
+    end
+end
+
+
+--============================================================
+-- COLORS
+--============================================================
+
+local C = {
+
+    BG =
+        Color3.fromRGB(
+            13,
+            15,
+            20
+        ),
+
+    TOP =
+        Color3.fromRGB(
+            23,
+            26,
+            34
+        ),
+
+    SIDE =
+        Color3.fromRGB(
+            19,
+            22,
+            29
+        ),
+
+    PANEL =
+        Color3.fromRGB(
+            25,
+            28,
+            36
+        ),
+
+    PANEL2 =
+        Color3.fromRGB(
+            30,
+            34,
+            43
+        ),
+
+    SLOT =
+        Color3.fromRGB(
+            38,
+            42,
+            53
+        ),
+
+    TEXT =
+        Color3.fromRGB(
+            242,
+            244,
+            250
+        ),
+
+    MUTED =
+        Color3.fromRGB(
+            145,
+            154,
+            173
+        ),
+
+    ACCENT =
+        Color3.fromRGB(
+            78,
+            132,
+            255
+        ),
+
+    GREEN =
+        Color3.fromRGB(
+            76,
+            215,
+            126
+        ),
+
+    RED =
+        Color3.fromRGB(
+            235,
+            80,
+            94
+        ),
+
+    YELLOW =
+        Color3.fromRGB(
+            244,
+            190,
+            72
+        ),
+
+    PURPLE =
+        Color3.fromRGB(
+            218,
+            95,
+            255
+        ),
+
+    ORANGE =
+        Color3.fromRGB(
+            255,
+            153,
+            72
+        ),
+}
+
+
+--============================================================
+-- UI HELPERS
+--============================================================
+
+local function corner(
+    object,
+    radius
+)
+
+    local value =
+        Instance.new(
+            "UICorner"
+        )
+
+    value.CornerRadius =
+        UDim.new(
+            0,
+            radius or 8
+        )
+
+    value.Parent =
+        object
+
+    return value
+end
+
+
+local function stroke(
+    object,
+    transparency
+)
+
+    local value =
+        Instance.new(
+            "UIStroke"
+        )
+
+    value.Color =
+        Color3.fromRGB(
+            58,
+            64,
+            78
+        )
+
+    value.Transparency =
+        transparency
+        or 0.35
+
+    value.Thickness =
+        1
+
+    value.Parent =
+        object
+
+    return value
+end
+
+
+local function label(
+    parent,
+    text,
+    size,
+    position,
+    font,
+    textSize,
+    color,
+    alignment
+)
+
+    local value =
+        Instance.new(
+            "TextLabel"
+        )
+
+    value.BackgroundTransparency =
+        1
+
+    value.Size =
+        size
+
+    value.Position =
+        position
+
+    value.Text =
+        text or ""
+
+    value.Font =
+        font
+        or Enum.Font.Gotham
+
+    value.TextSize =
+        textSize
+        or 14
+
+    value.TextColor3 =
+        color
+        or C.TEXT
+
+    value.TextXAlignment =
+        alignment
+        or Enum.TextXAlignment.Left
+
+    value.TextYAlignment =
+        Enum.TextYAlignment.Center
+
+    value.Parent =
+        parent
+
+    return value
+end
+
+
+local function button(
+    parent,
+    text,
+    size,
+    position
+)
+
+    local value =
+        Instance.new(
+            "TextButton"
+        )
+
+    value.Size =
+        size
+
+    value.Position =
+        position
+
+    value.BackgroundColor3 =
+        C.PANEL2
+
+    value.BorderSizePixel =
+        0
+
+    value.Text =
+        text or ""
+
+    value.TextColor3 =
+        C.TEXT
+
+    value.Font =
+        Enum.Font.GothamBold
+
+    value.TextSize =
+        11
+
+    value.AutoButtonColor =
+        true
+
+    value.Parent =
+        parent
+
+    corner(
+        value,
+        7
+    )
+
+    return value
+end
+
+
+local function textBox(
+    parent,
+    text,
+    placeholder,
+    size,
+    position
+)
+
+    local value =
+        Instance.new(
+            "TextBox"
+        )
+
+    value.Size =
+        size
+
+    value.Position =
+        position
+
+    value.BackgroundColor3 =
+        C.PANEL2
+
+    value.BorderSizePixel =
+        0
+
+    value.Text =
+        tostring(
+            text or ""
+        )
+
+    value.PlaceholderText =
+        placeholder
+        or ""
+
+    value.PlaceholderColor3 =
+        C.MUTED
+
+    value.TextColor3 =
+        C.TEXT
+
+    value.Font =
+        Enum.Font.Code
+
+    value.TextSize =
+        11
+
+    value.ClearTextOnFocus =
+        false
+
+    value.Parent =
+        parent
+
+    corner(
+        value,
+        7
+    )
+
+    return value
+end
+
+
+local function makeScroll(
+    parent,
+    size,
+    position
+)
+
+    local value =
+        Instance.new(
+            "ScrollingFrame"
+        )
+
+    value.Size =
+        size
+
+    value.Position =
+        position
+
+    value.BackgroundColor3 =
+        C.PANEL
+
+    value.BorderSizePixel =
+        0
+
+    value.CanvasSize =
+        UDim2.fromOffset(
+            0,
+            0
+        )
+
+    value.AutomaticCanvasSize =
+        Enum.AutomaticSize.Y
+
+    value.ScrollBarThickness =
+        5
+
+    value.Parent =
+        parent
+
+    corner(
+        value,
+        8
+    )
+
+    return value
+end
+
+
+local function addListLayout(
+    parent,
+    padding
+)
+
+    local layout =
+        Instance.new(
+            "UIListLayout"
+        )
+
+    layout.Padding =
+        UDim.new(
+            0,
+            padding or 5
+        )
+
+    layout.SortOrder =
+        Enum.SortOrder.LayoutOrder
+
+    layout.Parent =
+        parent
+
+
+    local pad =
+        Instance.new(
+            "UIPadding"
+        )
+
+    pad.PaddingTop =
+        UDim.new(
+            0,
+            7
+        )
+
+    pad.PaddingBottom =
+        UDim.new(
+            0,
+            7
+        )
+
+    pad.PaddingLeft =
+        UDim.new(
+            0,
+            7
+        )
+
+    pad.PaddingRight =
+        UDim.new(
+            0,
+            7
+        )
+
+    pad.Parent =
+        parent
+
+    return layout
+end
+
+
+--============================================================
+-- BASIC HELPERS
+--============================================================
+
+local function num(value)
+
+    if type(value) == "number" then
+        return value
+    end
+
+    return tonumber(value)
+end
+
+
+local function round(
+    value,
+    decimals
+)
+
+    if type(value) ~= "number" then
         return nil
     end
 
-    local ok, data =
+    local power =
+        10 ^ (
+            decimals
+            or 6
+        )
+
+    return
+        math.floor(
+            value
+            * power
+            + 0.5
+        )
+        / power
+end
+
+
+local function valueText(value)
+
+    if type(value) ~= "number" then
+        return "?"
+    end
+
+    if
+        math.abs(value)
+        < 0.000000001
+    then
+
+        return "0"
+    end
+
+    local text
+
+    if
+        math.abs(value)
+        >= 100
+    then
+
+        text =
+            string.format(
+                "%.2f",
+                value
+            )
+
+    elseif
+        math.abs(value)
+        >= 1
+    then
+
+        text =
+            string.format(
+                "%.4f",
+                value
+            )
+
+    else
+
+        text =
+            string.format(
+                "%.6f",
+                value
+            )
+    end
+
+    text =
+        text:gsub(
+            "0+$",
+            ""
+        )
+
+    text =
+        text:gsub(
+            "%.$",
+            ""
+        )
+
+    return text
+end
+
+
+local function normalize(text)
+
+    text =
+        tostring(
+            text
+            or ""
+        )
+
+    text =
+        text:lower()
+
+    text =
+        text:gsub(
+            "’",
+            "'"
+        )
+
+    text =
+        text:gsub(
+            "&",
+            "and"
+        )
+
+    text =
+        text:gsub(
+            "[^%w]",
+            ""
+        )
+
+    return text
+end
+
+
+local function aliases(text)
+
+    local result =
+        {}
+
+    local function add(value)
+
+        local key =
+            normalize(
+                value
+            )
+
+        if key ~= "" then
+            result[key] = true
+        end
+    end
+
+    local original =
+        tostring(
+            text
+            or ""
+        )
+
+    add(
+        original
+    )
+
+    add(
+        original:gsub(
+            "%b()",
+            ""
+        )
+    )
+
+    add(
+        original:gsub(
+            "Chocobunny",
+            "Choccybunny"
+        )
+    )
+
+    add(
+        original:gsub(
+            "Choccybunny",
+            "Chocobunny"
+        )
+    )
+
+    add(
+        original:gsub(
+            "%-",
+            " "
+        )
+    )
+
+    return result
+end
+
+
+local function shallowCopy(source)
+
+    local result =
+        {}
+
+    if type(source) ~= "table" then
+        return result
+    end
+
+    for key,
+        value in pairs(
+            source
+        )
+    do
+
+        result[key] =
+            value
+    end
+
+    return result
+end
+
+
+--============================================================
+-- BOOT GUI
+--============================================================
+
+local BootGui =
+    Instance.new(
+        "ScreenGui"
+    )
+
+BootGui.Name =
+    BOOT_NAME
+
+BootGui.ResetOnSpawn =
+    false
+
+BootGui.DisplayOrder =
+    1000000
+
+BootGui.Parent =
+    GuiParent
+
+
+local BootFrame =
+    Instance.new(
+        "Frame"
+    )
+
+BootFrame.Size =
+    UDim2.fromOffset(
+        520,
+        86
+    )
+
+BootFrame.Position =
+    UDim2.new(
+        0.5,
+        -260,
+        0,
+        90
+    )
+
+BootFrame.BackgroundColor3 =
+    C.TOP
+
+BootFrame.BorderSizePixel =
+    0
+
+BootFrame.Parent =
+    BootGui
+
+
+corner(
+    BootFrame,
+    10
+)
+
+
+stroke(
+    BootFrame,
+    0.2
+)
+
+
+local BootText =
+    label(
+        BootFrame,
+        "",
+        UDim2.new(
+            1,
+            -20,
+            1,
+            -12
+        ),
+        UDim2.fromOffset(
+            10,
+            6
+        ),
+        Enum.Font.Code,
+        13,
+        C.TEXT
+    )
+
+BootText.TextWrapped =
+    true
+
+
+local function setBoot(
+    step,
+    text,
+    errorState
+)
+
+    BootText.Text =
+        "ADOPT ME ANALYZER V"
+        .. VERSION
+        .. "\n"
+        .. tostring(step)
+        .. "  "
+        .. tostring(text)
+
+    BootText.TextColor3 =
+        errorState
+        and C.RED
+        or C.TEXT
+
+    print(
+        "[AM V"
+        .. VERSION
+        .. "]",
+        step,
+        text
+    )
+end
+
+
+local function traceback(errorMessage)
+
+    local result =
+        tostring(
+            errorMessage
+        )
+
+    if
+        debug
+        and type(
+            debug.traceback
+        ) == "function"
+    then
+
+        local ok,
+            trace =
+            pcall(
+                debug.traceback
+            )
+
+        if ok then
+
+            result =
+                result
+                .. "\n"
+                .. tostring(
+                    trace
+                )
+        end
+    end
+
+    return result
+end
+
+
+--============================================================
+-- ADOPT ME MODULES
+--============================================================
+
+setBoot(
+    "1/9",
+    "LOADING ADOPT ME"
+)
+
+
+local Fsys
+local ClientData
+local ItemDB
+local RouterClient
+
+
+do
+
+    local ok,
+        err =
+        xpcall(
+            function()
+
+                Fsys =
+                    require(
+                        RS:
+                        WaitForChild(
+                            "Fsys"
+                        )
+                    )
+
+                assert(
+                    type(Fsys)
+                    == "table",
+                    "Fsys invalid"
+                )
+
+                assert(
+                    type(Fsys.load)
+                    == "function",
+                    "Fsys.load missing"
+                )
+
+                ClientData =
+                    Fsys.load(
+                        "ClientData"
+                    )
+
+                ItemDB =
+                    Fsys.load(
+                        "ItemDB"
+                    )
+
+                pcall(
+                    function()
+
+                        RouterClient =
+                            Fsys.load(
+                                "RouterClient"
+                            )
+                    end
+                )
+
+                assert(
+                    type(ClientData)
+                    == "table",
+                    "ClientData invalid"
+                )
+
+                assert(
+                    type(ItemDB)
+                    == "table",
+                    "ItemDB invalid"
+                )
+            end,
+
+            traceback
+        )
+
+    if not ok then
+
+        setBoot(
+            "ERROR",
+            err,
+            true
+        )
+
+        return
+    end
+end
+
+
+setBoot(
+    "2/9",
+    "CLIENT DATA OK"
+)
+
+
+--============================================================
+-- ITEM DB
+--============================================================
+
+local CATEGORY_DISPLAY = {
+
+    pets =
+        "PET",
+
+    pet_accessories =
+        "PET WEAR",
+
+    strollers =
+        "STROLLER",
+
+    food =
+        "FOOD",
+
+    vehicles =
+        "VEHICLE",
+
+    toys =
+        "TOY",
+
+    gifts =
+        "GIFT",
+
+    stickers =
+        "STICKER",
+
+    houses =
+        "HOUSE",
+}
+
+
+local ADOPT_TO_AMVGG = {
+
+    pet_accessories =
+        "petwear",
+
+    strollers =
+        "strollers",
+
+    food =
+        "food",
+
+    vehicles =
+        "vehicles",
+
+    toys =
+        "toys",
+
+    gifts =
+        "gifts",
+
+    stickers =
+        "stickers",
+
+    houses =
+        "houses",
+}
+
+
+local function getItemDB(item)
+
+    if type(item) ~= "table" then
+        return nil
+    end
+
+    local category =
+        ItemDB[
+            item.category
+        ]
+
+    if type(category) ~= "table" then
+        return nil
+    end
+
+    return
+        category[
+            item.kind
+        ]
+end
+
+
+local function getItemName(item)
+
+    if type(item) ~= "table" then
+        return "Unknown Item"
+    end
+
+    local db =
+        getItemDB(
+            item
+        )
+
+    if type(db) == "table" then
+
+        if db.name then
+
+            return
+                tostring(
+                    db.name
+                )
+        end
+
+        if db.display_name then
+
+            return
+                tostring(
+                    db.display_name
+                )
+        end
+    end
+
+    return
+        tostring(
+            item.kind
+            or item.name
+            or "Unknown Item"
+        )
+end
+
+
+local function getCategoryDisplay(item)
+
+    local category =
+        tostring(
+            item
+            and item.category
+            or "unknown"
+        )
+
+    return
+        CATEGORY_DISPLAY[
+            category
+        ]
+        or category:upper()
+end
+
+
+--============================================================
+-- PET VARIANT
+--============================================================
+
+local function boolProperty(
+    item,
+    key
+)
+
+    if type(item) ~= "table" then
+        return false
+    end
+
+    if item[key] == true then
+        return true
+    end
+
+    if
+        type(
+            item.properties
+        ) == "table"
+        and item.properties[key]
+            == true
+    then
+
+        return true
+    end
+
+    return false
+end
+
+
+local function getVariant(item)
+
+    if
+        type(item) ~= "table"
+        or item.category
+            ~= "pets"
+    then
+
+        return ""
+    end
+
+    local neon =
+        boolProperty(
+            item,
+            "neon"
+        )
+
+    local mega =
+        boolProperty(
+            item,
+            "mega_neon"
+        )
+        or boolProperty(
+            item,
+            "mega"
+        )
+
+    local fly =
+        boolProperty(
+            item,
+            "flyable"
+        )
+        or boolProperty(
+            item,
+            "fly"
+        )
+
+    local ride =
+        boolProperty(
+            item,
+            "rideable"
+        )
+        or boolProperty(
+            item,
+            "ride"
+        )
+
+    local prefix =
+        ""
+
+    if mega then
+
+        prefix =
+            "M"
+
+    elseif neon then
+
+        prefix =
+            "N"
+    end
+
+    if
+        fly
+        and ride
+    then
+
+        return
+            prefix
+            .. "FR"
+
+    elseif fly then
+
+        return
+            prefix
+            .. "F"
+
+    elseif ride then
+
+        return
+            prefix
+            .. "R"
+    end
+
+    if prefix == "" then
+        return "NP"
+    end
+
+    return prefix
+end
+
+
+--============================================================
+-- HTTP
+--============================================================
+
+local REQUEST =
+
+    rawget(
+        ENV,
+        "request"
+    )
+
+    or rawget(
+        ENV,
+        "http_request"
+    )
+
+
+if
+    not REQUEST
+    and syn
+then
+
+    REQUEST =
+        syn.request
+end
+
+
+if
+    not REQUEST
+    and http
+then
+
+    REQUEST =
+        http.request
+end
+
+
+local function httpGet(
+    url,
+    headers
+)
+
+    if type(REQUEST) == "function" then
+
+        local ok,
+            response =
+            pcall(
+                REQUEST,
+                {
+                    Url = url,
+                    URL = url,
+                    Method = "GET",
+                    Headers =
+                        headers
+                        or {},
+                }
+            )
+
+        if ok then
+
+            if
+                type(response)
+                == "string"
+            then
+
+                return
+                    response,
+                    200
+            end
+
+            if
+                type(response)
+                == "table"
+            then
+
+                return
+
+                    response.Body
+                    or response.body,
+
+                    tonumber(
+                        response.StatusCode
+                        or response.Status
+                        or response.status_code
+                    )
+                    or 0
+            end
+        end
+    end
+
+    local ok,
+        body =
         pcall(
             function()
 
                 return
-                    HttpService:JSONDecode(
-                        readfile(path)
+                    game:HttpGet(
+                        url,
+                        true
                     )
             end
         )
 
-    if ok and type(data) == "table" then
-        return data
+    if ok then
+
+        return
+            body,
+            200
+    end
+
+    return
+        nil,
+        0
+end
+
+
+--============================================================
+-- JSON EXTRACT
+--============================================================
+
+local function extractObject(
+    body,
+    startPosition
+)
+
+    local depth =
+        0
+
+    local inString =
+        false
+
+    local escaped =
+        false
+
+    for i =
+        startPosition,
+        #body
+    do
+
+        local byte =
+            string.byte(
+                body,
+                i
+            )
+
+        if inString then
+
+            if escaped then
+
+                escaped =
+                    false
+
+            elseif byte == 92 then
+
+                escaped =
+                    true
+
+            elseif byte == 34 then
+
+                inString =
+                    false
+            end
+
+        else
+
+            if byte == 34 then
+
+                inString =
+                    true
+
+            elseif byte == 123 then
+
+                depth =
+                    depth
+                    + 1
+
+            elseif byte == 125 then
+
+                depth =
+                    depth
+                    - 1
+
+                if depth == 0 then
+
+                    return
+
+                        body:sub(
+                            startPosition,
+                            i
+                        ),
+
+                        i
+                end
+            end
+        end
     end
 
     return nil
 end
 
-local function saveJSONFile(path, data)
 
-    if type(writefile) ~= "function" then
+--============================================================
+-- AMVGG PARSER
+--============================================================
+
+local function validEntry(object)
+
+    if
+        type(object)
+            ~= "table"
+        or type(
+            object.name
+        ) ~= "string"
+    then
+
         return false
     end
 
-    local ok =
+    return
+
+        object.value
+            ~= nil
+
+        or object.regularValue
+            ~= nil
+
+        or object.neonValue
+            ~= nil
+
+        or object.megaValue
+            ~= nil
+
+        or object.npRegularValue
+            ~= nil
+
+        or object.npNeonValue
+            ~= nil
+
+        or object.npMegaValue
+            ~= nil
+
+        or object.fValue
+            ~= nil
+
+        or object.rValue
+            ~= nil
+
+        or object.frValue
+            ~= nil
+end
+
+
+local function merge(
+    target,
+    source
+)
+
+    for key,
+        value in pairs(
+            source
+        )
+    do
+
+        if value ~= nil then
+
+            target[key] =
+                value
+        end
+    end
+end
+
+
+local function parseBody(body)
+
+    local database =
+        {}
+
+    local count =
+        0
+
+    if type(body) ~= "string" then
+
+        return
+            database,
+            count
+    end
+
+    local cursor =
+        1
+
+    local scanned =
+        0
+
+    while
+        cursor
+        <= #body
+    do
+
+        local position =
+            body:find(
+                '{"id":',
+                cursor,
+                true
+            )
+
+        if not position then
+            break
+        end
+
+        local jsonText,
+            ending =
+            extractObject(
+                body,
+                position
+            )
+
+        if
+            not jsonText
+            or not ending
+        then
+
+            cursor =
+                position
+                + 5
+
+            continue
+        end
+
+        cursor =
+            ending
+            + 1
+
+        local ok,
+            object =
+            pcall(
+                function()
+
+                    return
+                        HttpService:
+                        JSONDecode(
+                            jsonText
+                        )
+                end
+            )
+
+        if
+            ok
+            and validEntry(
+                object
+            )
+        then
+
+            local key =
+                normalize(
+                    object.name
+                )
+
+            if key ~= "" then
+
+                if
+                    not database[
+                        key
+                    ]
+                then
+
+                    database[key] =
+                        {}
+
+                    count =
+                        count
+                        + 1
+                end
+
+                merge(
+                    database[key],
+                    object
+                )
+            end
+        end
+
+        scanned =
+            scanned
+            + 1
+
+        if
+            scanned % 200
+            == 0
+        then
+
+            task.wait()
+        end
+    end
+
+    return
+        database,
+        count
+end
+
+
+--============================================================
+-- AMVGG
+--============================================================
+
+local AMVGG = {
+
+    loading =
+        false,
+
+    ready =
+        false,
+
+    error =
+        nil,
+
+    version =
+        0,
+
+    categories =
+        {},
+
+    counts =
+        {},
+
+    total =
+        0,
+
+    lastRefresh =
+        0,
+}
+
+
+local CATEGORY_URLS = {
+
+    "pets",
+    "eggs",
+    "petwear",
+    "strollers",
+    "food",
+    "vehicles",
+    "toys",
+    "gifts",
+    "stickers",
+    "houses",
+}
+
+
+local function loadCategory(slug)
+
+    local token =
+        tostring(
+            os.time()
+        )
+        .. tostring(
+            math.random(
+                100000,
+                999999
+            )
+        )
+
+    local attempts = {
+
+        {
+            url =
+                "https://amvgg.com/values/"
+                .. slug
+                .. "?_rsc="
+                .. token,
+
+            headers = {
+                ["RSC"] =
+                    "1",
+            },
+        },
+
+        {
+            url =
+                "https://amvgg.com/values/"
+                .. slug
+                .. "?v="
+                .. token,
+
+            headers =
+                {},
+        },
+
+        {
+            url =
+                "https://amvgg.com/values/"
+                .. slug,
+
+            headers =
+                {},
+        },
+    }
+
+    local bestDatabase =
+        {}
+
+    local bestCount =
+        0
+
+    local lastStatus =
+        0
+
+    for _,
+        attempt in ipairs(
+            attempts
+        )
+    do
+
+        local body,
+            status =
+            httpGet(
+                attempt.url,
+                attempt.headers
+            )
+
+        lastStatus =
+            status
+
+        if
+            status >= 200
+            and status < 400
+            and type(body)
+                == "string"
+        then
+
+            local database,
+                count =
+                parseBody(
+                    body
+                )
+
+            if count > bestCount then
+
+                bestDatabase =
+                    database
+
+                bestCount =
+                    count
+            end
+
+            if count >= 3 then
+                break
+            end
+        end
+
+        task.wait(
+            0.12
+        )
+    end
+
+    return
+        bestDatabase,
+        bestCount,
+        lastStatus
+end
+
+
+local function refresh()
+
+    if AMVGG.loading then
+        return false
+    end
+
+    AMVGG.loading =
+        true
+
+    AMVGG.error =
+        nil
+
+    local nextCategories =
+        {}
+
+    local nextCounts =
+        {}
+
+    local total =
+        0
+
+    local failed =
+        {}
+
+    for _,
+        slug in ipairs(
+            CATEGORY_URLS
+        )
+    do
+
+        local database,
+            count,
+            status =
+            loadCategory(
+                slug
+            )
+
+        nextCategories[slug] =
+            database
+
+        nextCounts[slug] =
+            count
+
+        total =
+            total
+            + count
+
+        if count <= 0 then
+
+            failed[
+                #failed + 1
+            ] =
+                slug
+                .. "("
+                .. tostring(
+                    status
+                )
+                .. ")"
+        end
+
+        task.wait()
+    end
+
+    if total <= 0 then
+
+        AMVGG.loading =
+            false
+
+        AMVGG.error =
+            "NO AMVGG DATA"
+
+        return false
+    end
+
+    AMVGG.categories =
+        nextCategories
+
+    AMVGG.counts =
+        nextCounts
+
+    AMVGG.total =
+        total
+
+    AMVGG.ready =
+        true
+
+    AMVGG.loading =
+        false
+
+    AMVGG.version =
+        AMVGG.version
+        + 1
+
+    AMVGG.lastRefresh =
+        os.time()
+
+    if #failed > 0 then
+
+        AMVGG.error =
+            "PARTIAL: "
+            .. table.concat(
+                failed,
+                ", "
+            )
+    end
+
+    return true
+end
+
+
+--============================================================
+-- AMVGG LOOKUP
+--============================================================
+
+local function findCategory(
+    slug,
+    itemName
+)
+
+    local category =
+        AMVGG.categories[
+            slug
+        ]
+
+    if type(category) ~= "table" then
+        return nil
+    end
+
+    local keys =
+        aliases(
+            itemName
+        )
+
+    for key in pairs(
+        keys
+    ) do
+
+        local direct =
+            category[key]
+
+        if direct then
+
+            return
+                direct,
+                key
+        end
+    end
+
+    for key,
+        entry in pairs(
+            category
+        )
+    do
+
+        if type(entry) == "table" then
+
+            local entryAliases =
+                aliases(
+                    entry.name
+                )
+
+            for wanted in pairs(
+                keys
+            ) do
+
+                if
+                    entryAliases[
+                        wanted
+                    ]
+                then
+
+                    return
+                        entry,
+                        key
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+
+local function findAMVGG(item)
+
+    if type(item) ~= "table" then
+        return nil
+    end
+
+    local itemName =
+        getItemName(
+            item
+        )
+
+    if item.category == "pets" then
+
+        if
+            itemName:
+            lower():
+            find(
+                "egg",
+                1,
+                true
+            )
+        then
+
+            local egg =
+                findCategory(
+                    "eggs",
+                    itemName
+                )
+
+            if egg then
+
+                return
+                    egg,
+                    "eggs"
+            end
+        end
+
+        local pet =
+            findCategory(
+                "pets",
+                itemName
+            )
+
+        if pet then
+
+            return
+                pet,
+                "pets"
+        end
+
+        local egg =
+            findCategory(
+                "eggs",
+                itemName
+            )
+
+        if egg then
+
+            return
+                egg,
+                "eggs"
+        end
+
+        return nil
+    end
+
+    local slug =
+        ADOPT_TO_AMVGG[
+            item.category
+        ]
+
+    if not slug then
+        return nil
+    end
+
+    local entry =
+        findCategory(
+            slug,
+            itemName
+        )
+
+    if entry then
+
+        return
+            entry,
+            slug
+    end
+
+    return nil
+end
+
+
+--============================================================
+-- PET VALUE FIELDS
+--============================================================
+
+local EXACT_FIELDS = {
+
+    NP = {
+        "npRegularValue",
+        "noPotionRegularValue",
+        "npValue",
+    },
+
+    R = {
+        "rValue",
+        "rideValue",
+    },
+
+    F = {
+        "fValue",
+        "flyValue",
+    },
+
+    FR = {
+        "regularValue",
+        "frValue",
+    },
+
+    N = {
+        "npNeonValue",
+        "nValue",
+    },
+
+    NR = {
+        "nrValue",
+        "neonRideValue",
+    },
+
+    NF = {
+        "nfValue",
+        "neonFlyValue",
+    },
+
+    NFR = {
+        "neonValue",
+        "nfrValue",
+    },
+
+    M = {
+        "npMegaValue",
+        "mValue",
+    },
+
+    MR = {
+        "mrValue",
+        "megaRideValue",
+    },
+
+    MF = {
+        "mfValue",
+        "megaFlyValue",
+    },
+
+    MFR = {
+        "megaValue",
+        "mfrValue",
+    },
+}
+
+
+local function firstNumberField(
+    entry,
+    fields
+)
+
+    for _,
+        field in ipairs(
+            fields
+        )
+    do
+
+        local value =
+            num(
+                entry[field]
+            )
+
+        if value ~= nil then
+
+            return
+                value,
+                field
+        end
+    end
+
+    return nil
+end
+
+
+local function fallbackPetValue(
+    entry,
+    variant
+)
+
+    local base
+    local field
+    local factor
+
+    if
+        variant == "NP"
+        or variant == "R"
+        or variant == "F"
+        or variant == "FR"
+    then
+
+        base =
+            num(
+                entry.regularValue
+            )
+
+        field =
+            "regularValue"
+
+        factor =
+            ({
+                NP = 0.70,
+                R = 0.86,
+                F = 0.92,
+                FR = 1,
+            })[
+                variant
+            ]
+
+    elseif
+        variant == "N"
+        or variant == "NR"
+        or variant == "NF"
+        or variant == "NFR"
+    then
+
+        base =
+            num(
+                entry.neonValue
+            )
+
+        field =
+            "neonValue"
+
+        factor =
+            ({
+                N = 0.82,
+                NR = 0.91,
+                NF = 0.95,
+                NFR = 1,
+            })[
+                variant
+            ]
+
+    elseif
+        variant == "M"
+        or variant == "MR"
+        or variant == "MF"
+        or variant == "MFR"
+    then
+
+        base =
+            num(
+                entry.megaValue
+            )
+
+        field =
+            "megaValue"
+
+        factor =
+            ({
+                M = 0.88,
+                MR = 0.94,
+                MF = 0.97,
+                MFR = 1,
+            })[
+                variant
+            ]
+    end
+
+    if
+        not base
+        or not factor
+    then
+
+        return nil
+    end
+
+    local estimated =
+
+        variant ~= "FR"
+        and variant ~= "NFR"
+        and variant ~= "MFR"
+
+    return
+
+        round(
+            base * factor,
+            7
+        ),
+
+        field
+        .. "*"
+        .. tostring(
+            factor
+        ),
+
+        estimated
+end
+
+
+local function getPetValue(
+    entry,
+    variant
+)
+
+    if type(entry) ~= "table" then
+        return nil
+    end
+
+    local fields =
+        EXACT_FIELDS[
+            variant
+        ]
+
+    if fields then
+
+        local exact,
+            field =
+            firstNumberField(
+                entry,
+                fields
+            )
+
+        if exact ~= nil then
+
+            return
+                exact,
+                field,
+                false
+        end
+    end
+
+    local category =
+        tonumber(
+            entry.category
+        )
+
+    if category == 13 then
+
+        return
+            nil,
+            nil,
+            false
+    end
+
+    return
+        fallbackPetValue(
+            entry,
+            variant
+        )
+end
+
+
+local function genericValue(entry)
+
+    if type(entry) ~= "table" then
+        return nil
+    end
+
+    local fields = {
+        "value",
+        "regularValue",
+        "npRegularValue",
+    }
+
+    return
+        firstNumberField(
+            entry,
+            fields
+        )
+end
+
+
+--============================================================
+-- ANALYZE ITEM
+--============================================================
+
+local function analyzeItem(item)
+
+    local result = {
+
+        name =
+            getItemName(
+                item
+            ),
+
+        category =
+            getCategoryDisplay(
+                item
+            ),
+
+        variant =
+            getVariant(
+                item
+            ),
+
+        source =
+            nil,
+
+        value =
+            nil,
+
+        field =
+            nil,
+
+        estimated =
+            false,
+
+        reason =
+            nil,
+    }
+
+    if not AMVGG.ready then
+
+        result.reason =
+            "AMVGG NOT READY"
+
+        return result
+    end
+
+    local entry,
+        source =
+        findAMVGG(
+            item
+        )
+
+    if not entry then
+
+        result.reason =
+            "NOT FOUND"
+
+        return result
+    end
+
+    result.source =
+        source
+
+    if source == "pets" then
+
+        local value,
+            field,
+            estimated =
+            getPetValue(
+                entry,
+                result.variant
+            )
+
+        result.value =
+            value
+
+        result.field =
+            field
+
+        result.estimated =
+            estimated == true
+
+        if value == nil then
+            result.reason = "NO VALUE"
+        elseif estimated then
+            result.reason = "ESTIMATED"
+        end
+
+        return result
+    end
+
+    result.variant =
+        ""
+
+    local value,
+        field =
+        genericValue(
+            entry
+        )
+
+    result.value =
+        value
+
+    result.field =
+        field
+
+    if value == nil then
+        result.reason = "NO VALUE"
+    end
+
+    return result
+end
+
+
+--============================================================
+-- SETTINGS
+--============================================================
+
+local SETTINGS_FILE =
+    "am_trade_v1170.json"
+
+local FIRST_SEEN_FILE =
+    "am_first_seen_v1170.json"
+
+
+local Settings = {
+
+    testAutoAccept =
+        false,
+
+    autoTrade =
+        false,
+
+    minProfitPercent =
+        10,
+
+    requestTimeout =
+        15,
+
+    firstItemTimeout =
+        25,
+
+    addTimeout =
+        40,
+
+    playerCooldown =
+        300,
+
+    settleSeconds =
+        2,
+
+    maxTradeSeconds =
+        120,
+
+    newItemHours =
+        24,
+
+    refreshMinutes =
+        5,
+
+    allowedItems =
+        "",
+
+    chatRequests =
+        true,
+
+    maxOurItems =
+        18,
+
+    optimizerBeam =
+        350,
+
+    blockEstimated =
+        true,
+}
+
+
+local function loadJSON(path)
+
+    if
+        type(readfile)
+            ~= "function"
+        or type(isfile)
+            ~= "function"
+    then
+
+        return nil
+    end
+
+    local ok,
+        exists =
+        pcall(
+            isfile,
+            path
+        )
+
+    if
+        not ok
+        or not exists
+    then
+
+        return nil
+    end
+
+    local ok2,
+        result =
         pcall(
             function()
 
-                writefile(
-                    path,
-
-                    HttpService:JSONEncode(
-                        data
+                return
+                    HttpService:
+                    JSONDecode(
+                        readfile(
+                            path
+                        )
                     )
-                )
             end
         )
 
-    return ok
+    if
+        ok2
+        and type(result)
+            == "table"
+    then
+
+        return result
+    end
+
+    return nil
 end
 
+
+local function saveJSON(
+    path,
+    data
+)
+
+    if type(writefile) ~= "function" then
+        return
+    end
+
+    pcall(
+        function()
+
+            writefile(
+                path,
+
+                HttpService:
+                JSONEncode(
+                    data
+                )
+            )
+        end
+    )
+end
+
+
 do
+
     local saved =
-        loadJSONFile(
-            TEST_SETTINGS_FILE
+        loadJSON(
+            SETTINGS_FILE
         )
 
     if type(saved) == "table" then
 
-        for k, v in pairs(saved) do
+        for key,
+            value in pairs(
+                saved
+            )
+        do
 
-            if TestSettings[k] ~= nil then
-                TestSettings[k] = v
+            if Settings[key] ~= nil then
+
+                Settings[key] =
+                    value
             end
         end
     end
 end
 
-local function saveTestSettings()
 
-    saveJSONFile(
-        TEST_SETTINGS_FILE,
-        TestSettings
+local function saveSettings()
+
+    saveJSON(
+        SETTINGS_FILE,
+        Settings
     )
 end
 
---============================================================
--- TEST LOG
---============================================================
-
-local TestLogs = {}
-
-local function testLog(...)
-
-    local parts = {}
-
-    for i, value in ipairs({...}) do
-        parts[i] = tostring(value)
-    end
-
-    local text =
-        table.concat(
-            parts,
-            " "
-        )
-
-    TestLogs[#TestLogs + 1] =
-        text
-
-    if #TestLogs > 60 then
-        table.remove(TestLogs, 1)
-    end
-
-    print(
-        "[AM AUTO]",
-        text
-    )
-end
 
 --============================================================
 -- FIRST SEEN DATABASE
 --============================================================
 
 local FirstSeen =
-    loadJSONFile(
+    loadJSON(
         FIRST_SEEN_FILE
     )
+
 
 if type(FirstSeen) ~= "table" then
 
     FirstSeen = {
-        initialized = false,
-        items = {},
+
+        initialized =
+            false,
+
+        items =
+            {},
     }
 end
 
+
 if type(FirstSeen.items) ~= "table" then
-    FirstSeen.items = {}
+
+    FirstSeen.items =
+        {}
 end
 
-local function amvggEntryID(
+
+local function entryID(
     source,
     key,
     entry
@@ -246,7 +2769,9 @@ local function amvggEntryID(
     then
 
         return
-            tostring(entry.id)
+            tostring(
+                entry.id
+            )
     end
 
     return
@@ -254,6 +2779,7 @@ local function amvggEntryID(
         .. ":"
         .. tostring(key)
 end
+
 
 local function updateFirstSeen()
 
@@ -271,30 +2797,36 @@ local function updateFirstSeen()
     local changed =
         false
 
-    for source, database in pairs(
-        AMVGG.categories
-    ) do
+    for source,
+        database in pairs(
+            AMVGG.categories
+        )
+    do
 
         if type(database) == "table" then
 
-            for key, entry in pairs(database) do
+            for key,
+                entry in pairs(
+                    database
+                )
+            do
 
                 local id =
-                    amvggEntryID(
+                    entryID(
                         source,
                         key,
                         entry
                     )
 
                 if
-                    FirstSeen.items[id]
+                    FirstSeen.items[
+                        id
+                    ]
                     == nil
                 then
 
                     if baseline then
 
-                        -- Everything existing on first installation
-                        -- is treated as already old.
                         FirstSeen.items[id] =
                             0
 
@@ -302,13 +2834,6 @@ local function updateFirstSeen()
 
                         FirstSeen.items[id] =
                             now
-
-                        testLog(
-                            "NEW AMVGG ITEM:",
-                            source,
-                            tostring(entry.name),
-                            "24H IGNORE STARTED"
-                        )
                     end
 
                     changed =
@@ -329,12 +2854,13 @@ local function updateFirstSeen()
 
     if changed then
 
-        saveJSONFile(
+        saveJSON(
             FIRST_SEEN_FILE,
             FirstSeen
         )
     end
 end
+
 
 local function isNewEntry(
     source,
@@ -346,339 +2872,62 @@ local function isNewEntry(
         or not source
     then
 
-        return false, 0
+        return
+            false,
+            0
     end
 
-    local key =
-        normalize(
-            entry.name
-            or ""
-        )
-
     local id =
-        amvggEntryID(
+        entryID(
             source,
-            key,
+            normalize(
+                entry.name
+                or ""
+            ),
             entry
         )
 
     local seen =
         tonumber(
-            FirstSeen.items[id]
+            FirstSeen.items[
+                id
+            ]
         )
 
     if
-        seen == nil
+        not seen
         or seen <= 0
     then
 
-        return false, 0
+        return
+            false,
+            0
     end
 
     local age =
         os.time()
         - seen
 
-    local cooldown =
+    local maxAge =
         (
             tonumber(
-                TestSettings.newItemHours
+                Settings.newItemHours
             )
             or 24
         )
         * 3600
 
     return
-        age < cooldown,
+
+        age >= 0
+        and age < maxAge,
+
         age
 end
 
---============================================================
--- RESOLVE TRADE REMOTES
---============================================================
-
-local RouterClient
-
-pcall(
-    function()
-
-        RouterClient =
-            Fsys.load(
-                "RouterClient"
-            )
-    end
-)
-
-local function resolveTradeRemote(name)
-
-    local API =
-        RS:FindFirstChild(
-            "API"
-        )
-
-    if API then
-
-        local direct =
-            API:FindFirstChild(
-                name
-            )
-
-        if direct then
-            return direct
-        end
-    end
-
-    if
-        type(RouterClient) == "table"
-        and type(RouterClient.get) == "function"
-    then
-
-        local ok, remote =
-            pcall(
-                RouterClient.get,
-                name
-            )
-
-        if
-            ok
-            and remote
-        then
-            return remote
-        end
-    end
-
-    return nil
-end
-
-local TradeRemote = {
-
-    SendRequest =
-        resolveTradeRemote(
-            "TradeAPI/SendTradeRequest"
-        ),
-
-    Add =
-        resolveTradeRemote(
-            "TradeAPI/AddItemToOffer"
-        ),
-
-    Remove =
-        resolveTradeRemote(
-            "TradeAPI/RemoveItemFromOffer"
-        ),
-
-    Accept =
-        resolveTradeRemote(
-            "TradeAPI/AcceptNegotiation"
-        ),
-
-    Unaccept =
-        resolveTradeRemote(
-            "TradeAPI/UnacceptNegotiation"
-        ),
-
-    Confirm =
-        resolveTradeRemote(
-            "TradeAPI/ConfirmTrade"
-        ),
-
-    Decline =
-        resolveTradeRemote(
-            "TradeAPI/DeclineTrade"
-        ),
-
-    SuggestItem =
-        resolveTradeRemote(
-            "TradeAPI/SuggestItem"
-        ),
-
-    SuggestRemove =
-        resolveTradeRemote(
-            "TradeAPI/SuggestRemoveItem"
-        ),
-}
-
-local function remoteCall(
-    remote,
-    ...
-)
-
-    if not remote then
-        return false, "REMOTE MISSING"
-    end
-
-    local args = {...}
-
-    local ok, result =
-        pcall(
-            function()
-
-                if remote:IsA("RemoteEvent") then
-
-                    remote:FireServer(
-                        table.unpack(args)
-                    )
-
-                    return true
-
-                elseif remote:IsA("RemoteFunction") then
-
-                    return
-                        remote:InvokeServer(
-                            table.unpack(args)
-                        )
-                end
-
-                error(
-                    "UNKNOWN REMOTE CLASS "
-                    .. tostring(
-                        remote.ClassName
-                    )
-                )
-            end
-        )
-
-    if not ok then
-
-        testLog(
-            "REMOTE ERROR:",
-            remote.Name,
-            result
-        )
-
-        return false, result
-    end
-
-    return true, result
-end
 
 --============================================================
--- TRADE STATE
---============================================================
-
-local function getTrade()
-
-    local ok, trade =
-        pcall(
-            function()
-
-                return
-                    ClientData.get(
-                        "trade"
-                    )
-            end
-        )
-
-    if
-        ok
-        and type(trade) == "table"
-    then
-
-        return trade
-    end
-
-    return nil
-end
-
-local function getTradeSides(trade)
-
-    if type(trade) ~= "table" then
-        return nil
-    end
-
-    if isMe(trade.sender) then
-
-        return
-            trade.sender_offer,
-            trade.recipient_offer,
-            trade.sender,
-            trade.recipient
-
-    else
-
-        return
-            trade.recipient_offer,
-            trade.sender_offer,
-            trade.recipient,
-            trade.sender
-    end
-end
-
-local function getOfferItems(offer)
-
-    if
-        type(offer) == "table"
-        and type(offer.items) == "table"
-    then
-
-        return offer.items
-    end
-
-    return {}
-end
-
-local function countOfferItems(offer)
-
-    local count = 0
-
-    for _ in pairs(
-        getOfferItems(offer)
-    ) do
-        count += 1
-    end
-
-    return count
-end
-
-local function itemSignature(item)
-
-    return
-        tostring(
-            item.unique
-            or item.kind
-            or "?"
-        )
-        .. ":"
-        .. tostring(
-            getVariant(item)
-        )
-end
-
-local function offerOnlySignature(offer)
-
-    local list = {}
-
-    for _, item in pairs(
-        getOfferItems(offer)
-    ) do
-
-        list[#list + 1] =
-            itemSignature(item)
-    end
-
-    table.sort(list)
-
-    return
-        table.concat(
-            list,
-            "|"
-        )
-end
-
-local function completeOfferSignature(
-    mine,
-    theirs
-)
-
-    return
-        offerOnlySignature(mine)
-        .. " >>> "
-        .. offerOnlySignature(theirs)
-end
-
---============================================================
--- NEW ITEM = VALUE 0
--- UNKNOWN ITEM = BLOCK
+-- EFFECTIVE ITEM VALUE
 --============================================================
 
 local function effectiveItemValue(item)
@@ -689,34 +2938,44 @@ local function effectiveItemValue(item)
             item
         )
 
-    if entry and source then
+    if
+        entry
+        and source
+    then
 
-        local newItem,
+        local isNew,
             age =
             isNewEntry(
                 source,
                 entry
             )
 
-        if newItem then
+        if isNew then
 
             return {
 
-                known = true,
+                known =
+                    true,
 
-                newIgnored = true,
+                newIgnored =
+                    true,
 
-                value = 0,
+                estimated =
+                    false,
+
+                value =
+                    0,
 
                 name =
                     tostring(
                         entry.name
-                        or "NEW ITEM"
+                        or getItemName(
+                            item
+                        )
                     ),
 
-                source = source,
-
-                age = age,
+                age =
+                    age,
             }
         end
     end
@@ -727,25 +2986,31 @@ local function effectiveItemValue(item)
         )
 
     if
-        type(analysis) ~= "table"
-        or type(analysis.value)
-            ~= "number"
+        not analysis
+        or type(
+            analysis.value
+        ) ~= "number"
     then
 
         return {
 
-            known = false,
+            known =
+                false,
 
-            newIgnored = false,
+            newIgnored =
+                false,
 
-            value = 0,
+            estimated =
+                false,
+
+            value =
+                0,
 
             name =
                 analysis
                 and analysis.name
-                or tostring(
-                    item.kind
-                    or "UNKNOWN"
+                or getItemName(
+                    item
                 ),
 
             reason =
@@ -757,9 +3022,15 @@ local function effectiveItemValue(item)
 
     return {
 
-        known = true,
+        known =
+            true,
 
-        newIgnored = false,
+        newIgnored =
+            false,
+
+        estimated =
+            analysis.estimated
+            == true,
 
         value =
             analysis.value,
@@ -772,54 +3043,411 @@ local function effectiveItemValue(item)
     }
 end
 
+
+--============================================================
+-- PLAYER HELPERS
+--============================================================
+
+local function playerName(value)
+
+    if typeof(value) == "Instance" then
+        return value.Name
+    end
+
+    if type(value) == "table" then
+
+        return
+            tostring(
+                value.name
+                or value.username
+                or value.player_name
+                or value
+            )
+    end
+
+    return
+        tostring(
+            value
+            or "Unknown"
+        )
+end
+
+
+local function isMe(value)
+
+    if value == LocalPlayer then
+        return true
+    end
+
+    if type(value) == "number" then
+
+        return
+            value
+            == LocalPlayer.UserId
+    end
+
+    if type(value) == "table" then
+
+        local id =
+            tonumber(
+                value.user_id
+                or value.userId
+                or value.id
+            )
+
+        if id then
+
+            return
+                id
+                == LocalPlayer.UserId
+        end
+    end
+
+    return
+
+        playerName(value):
+        lower()
+
+        ==
+
+        LocalPlayer.Name:
+        lower()
+end
+
+
+--============================================================
+-- TRADE DATA
+--============================================================
+
+local function getTrade()
+
+    local keys = {
+        "trade",
+        "trading",
+    }
+
+    for _,
+        key in ipairs(
+            keys
+        )
+    do
+
+        local ok,
+            trade =
+            pcall(
+                function()
+
+                    return
+                        ClientData.get(
+                            key
+                        )
+                end
+            )
+
+        if
+            ok
+            and type(trade)
+                == "table"
+            and (
+                trade.sender
+                or trade.recipient
+                or trade.sender_offer
+                or trade.recipient_offer
+            )
+        then
+
+            return trade
+        end
+    end
+
+    return nil
+end
+
+
+local function getTradeSides(trade)
+
+    if type(trade) ~= "table" then
+        return nil
+    end
+
+    if isMe(
+        trade.sender
+    )
+    then
+
+        return
+
+            trade.sender_offer,
+            trade.recipient_offer,
+            trade.sender,
+            trade.recipient
+    end
+
+    if isMe(
+        trade.recipient
+    )
+    then
+
+        return
+
+            trade.recipient_offer,
+            trade.sender_offer,
+            trade.recipient,
+            trade.sender
+    end
+
+    return nil
+end
+
+
+local function getOfferItems(offer)
+
+    if type(offer) ~= "table" then
+        return {}
+    end
+
+    if
+        type(offer.items)
+        == "table"
+    then
+
+        return
+            offer.items
+    end
+
+    if
+        type(
+            offer.offer_items
+        ) == "table"
+    then
+
+        return
+            offer.offer_items
+    end
+
+    return {}
+end
+
+
+local function itemUID(item)
+
+    if type(item) ~= "table" then
+        return nil
+    end
+
+    return
+
+        item.unique
+        or item.uid
+        or item.id
+end
+
+
+local function countOfferItems(offer)
+
+    local count =
+        0
+
+    for _ in pairs(
+        getOfferItems(
+            offer
+        )
+    ) do
+
+        count =
+            count
+            + 1
+    end
+
+    return count
+end
+
+
+local function itemSignature(item)
+
+    return
+
+        tostring(
+            itemUID(
+                item
+            )
+            or item.kind
+            or "?"
+        )
+
+        .. ":"
+
+        .. tostring(
+            getVariant(
+                item
+            )
+        )
+end
+
+
+local function offerSignature(offer)
+
+    local list =
+        {}
+
+    for _,
+        item in pairs(
+            getOfferItems(
+                offer
+            )
+        )
+    do
+
+        list[
+            #list + 1
+        ] =
+            itemSignature(
+                item
+            )
+    end
+
+    table.sort(
+        list
+    )
+
+    return
+        table.concat(
+            list,
+            "|"
+        )
+end
+
+
+local function fullSignature(
+    mine,
+    theirs
+)
+
+    return
+
+        offerSignature(
+            mine
+        )
+
+        .. " >>> "
+
+        .. offerSignature(
+            theirs
+        )
+end
+
+
+--============================================================
+-- EVALUATE OFFER
+--============================================================
+
 local function evaluateOffer(offer)
 
     local result = {
 
-        total = 0,
+        total =
+            0,
 
-        count = 0,
+        count =
+            0,
 
-        unknown = 0,
+        unknown =
+            0,
 
-        newIgnored = 0,
+        estimated =
+            0,
 
-        unknownNames = {},
+        newIgnored =
+            0,
 
-        newNames = {},
+        unknownNames =
+            {},
+
+        estimatedNames =
+            {},
+
+        newNames =
+            {},
+
+        items =
+            {},
     }
 
-    for _, item in pairs(
-        getOfferItems(offer)
-    ) do
+    for _,
+        item in pairs(
+            getOfferItems(
+                offer
+            )
+        )
+    do
 
-        result.count += 1
+        result.count =
+            result.count
+            + 1
 
         local data =
             effectiveItemValue(
                 item
             )
 
+        result.items[
+            #result.items + 1
+        ] = {
+
+            raw =
+                item,
+
+            data =
+                data,
+        }
+
         if data.known then
 
             if data.newIgnored then
 
-                result.newIgnored += 1
+                result.newIgnored =
+                    result.newIgnored
+                    + 1
 
                 result.newNames[
                     #result.newNames + 1
                 ] =
                     data.name
 
+            elseif
+                data.estimated
+            then
+
+                result.estimated =
+                    result.estimated
+                    + 1
+
+                result.estimatedNames[
+                    #result.estimatedNames + 1
+                ] =
+                    data.name
+
+                if
+                    not Settings.blockEstimated
+                then
+
+                    result.total =
+                        result.total
+                        + data.value
+                end
+
             else
 
-                result.total +=
-                    data.value
+                result.total =
+                    result.total
+                    + data.value
             end
 
         else
 
-            result.unknown += 1
+            result.unknown =
+                result.unknown
+                + 1
 
             result.unknownNames[
                 #result.unknownNames + 1
@@ -831,14 +3459,17 @@ local function evaluateOffer(offer)
     return result
 end
 
+
 local function profitPercent(
     mine,
     theirs
 )
 
     if
-        type(mine) ~= "number"
-        or type(theirs) ~= "number"
+        type(mine)
+            ~= "number"
+        or type(theirs)
+            ~= "number"
         or mine <= 0
     then
 
@@ -846,6 +3477,7 @@ local function profitPercent(
     end
 
     return
+
         (
             (
                 theirs
@@ -856,84 +3488,355 @@ local function profitPercent(
         * 100
 end
 
+
 --============================================================
--- ALLOWED INVENTORY FILTER
+-- REMOTE RESOLUTION
 --============================================================
 
-local function parseAllowed()
+local function scanRemote(name)
 
-    local text =
-        tostring(
-            TestSettings.allowedItems
-            or ""
+    local API =
+        RS:
+        FindFirstChild(
+            "API"
         )
 
-    text =
-        text:gsub(
-            "\n",
-            ","
-        )
+    if API then
 
-    text =
-        text:gsub(
-            ";",
-            ","
-        )
+        local direct =
+            API:
+            FindFirstChild(
+                name
+            )
 
-    local allowed = {}
+        if direct then
+            return direct
+        end
 
-    for part in text:gmatch(
-        "[^,]+"
-    ) do
+        for _,
+            object in ipairs(
+                API:GetDescendants()
+            )
+        do
 
-        local key =
-            normalize(part)
+            if
+                object.Name == name
+                and (
+                    object:IsA(
+                        "RemoteEvent"
+                    )
+                    or object:IsA(
+                        "RemoteFunction"
+                    )
+                )
+            then
 
-        if key ~= "" then
-            allowed[key] = true
+                return object
+            end
         end
     end
 
-    return allowed
+    return nil
 end
 
-local function isAllowedName(name)
 
-    local allowed =
-        parseAllowed()
+local function routerGet(name)
 
-    if next(allowed) == nil then
-        return true
+    if type(RouterClient) ~= "table" then
+        return nil
+    end
+
+    if type(
+        RouterClient.get
+    ) ~= "function"
+    then
+
+        return nil
+    end
+
+    local ok,
+        result =
+        pcall(
+            function()
+
+                return
+                    RouterClient.get(
+                        name
+                    )
+            end
+        )
+
+    if ok and result then
+        return result
+    end
+
+    local ok2,
+        result2 =
+        pcall(
+            function()
+
+                return
+                    RouterClient:get(
+                        name
+                    )
+            end
+        )
+
+    if ok2 then
+        return result2
+    end
+
+    return nil
+end
+
+
+local function resolveRemote(list)
+
+    if type(list) == "string" then
+        list = {list}
+    end
+
+    for _,
+        name in ipairs(
+            list
+        )
+    do
+
+        local remote =
+            scanRemote(
+                name
+            )
+
+        if remote then
+
+            return
+                remote,
+                name
+        end
+
+        remote =
+            routerGet(
+                name
+            )
+
+        if remote then
+
+            return
+                remote,
+                name
+        end
+    end
+
+    return nil
+end
+
+
+local TradeRemote =
+    {}
+
+
+TradeRemote.SendRequest,
+TradeRemote.SendRequestName =
+    resolveRemote({
+
+        "TradeAPI/SendTradeRequest",
+        "TradeAPI/BeginTrade",
+        "TradeAPI/RequestTrade",
+    })
+
+
+TradeRemote.Add,
+TradeRemote.AddName =
+    resolveRemote({
+
+        "TradeAPI/AddItemToOffer",
+        "TradeAPI/AddItem",
+    })
+
+
+TradeRemote.Remove,
+TradeRemote.RemoveName =
+    resolveRemote({
+
+        "TradeAPI/RemoveItemFromOffer",
+        "TradeAPI/RemoveItem",
+    })
+
+
+TradeRemote.Accept,
+TradeRemote.AcceptName =
+    resolveRemote({
+
+        "TradeAPI/AcceptNegotiation",
+        "TradeAPI/AcceptTrade",
+    })
+
+
+TradeRemote.Unaccept,
+TradeRemote.UnacceptName =
+    resolveRemote({
+
+        "TradeAPI/UnacceptNegotiation",
+        "TradeAPI/UnacceptTrade",
+    })
+
+
+TradeRemote.Confirm,
+TradeRemote.ConfirmName =
+    resolveRemote({
+
+        "TradeAPI/ConfirmTrade",
+    })
+
+
+TradeRemote.Decline,
+TradeRemote.DeclineName =
+    resolveRemote({
+
+        "TradeAPI/DeclineTrade",
+        "TradeAPI/CancelTrade",
+    })
+
+
+TradeRemote.SuggestItem,
+TradeRemote.SuggestItemName =
+    resolveRemote({
+
+        "TradeAPI/SuggestItem",
+    })
+
+
+TradeRemote.SuggestRemove,
+TradeRemote.SuggestRemoveName =
+    resolveRemote({
+
+        "TradeAPI/SuggestRemoveItem",
+    })
+
+
+local function remoteCall(
+    remote,
+    ...
+)
+
+    if not remote then
+
+        return
+            false,
+            "REMOTE MISSING"
+    end
+
+    local args =
+        {...}
+
+    local ok,
+        result =
+        pcall(
+            function()
+
+                if typeof(remote) == "Instance" then
+
+                    if
+                        remote:IsA(
+                            "RemoteEvent"
+                        )
+                    then
+
+                        remote:FireServer(
+                            table.unpack(
+                                args
+                            )
+                        )
+
+                        return true
+                    end
+
+                    if
+                        remote:IsA(
+                            "RemoteFunction"
+                        )
+                    then
+
+                        return
+                            remote:
+                            InvokeServer(
+                                table.unpack(
+                                    args
+                                )
+                            )
+                    end
+                end
+
+                if type(remote) == "function" then
+
+                    return
+                        remote(
+                            table.unpack(
+                                args
+                            )
+                        )
+                end
+
+                if type(remote) == "table" then
+
+                    if
+                        type(
+                            remote.FireServer
+                        ) == "function"
+                    then
+
+                        return
+                            remote:
+                            FireServer(
+                                table.unpack(
+                                    args
+                                )
+                            )
+                    end
+
+                    if
+                        type(
+                            remote.InvokeServer
+                        ) == "function"
+                    then
+
+                        return
+                            remote:
+                            InvokeServer(
+                                table.unpack(
+                                    args
+                                )
+                            )
+                    end
+                end
+
+                error(
+                    "UNSUPPORTED REMOTE"
+                )
+            end
+        )
+
+    if not ok then
+
+        return
+            false,
+            result
     end
 
     return
-        allowed[
-            normalize(name)
-        ]
-        == true
+        true,
+        result
 end
 
+
 --============================================================
--- READ OUR INVENTORY
+-- INVENTORY
 --============================================================
-
-local function shallowCopy(source)
-
-    local result = {}
-
-    for k, v in pairs(
-        source
-    ) do
-
-        result[k] = v
-    end
-
-    return result
-end
 
 local function getInventory()
 
-    local ok, inventory =
+    local ok,
+        inventory =
         pcall(
             function()
 
@@ -954,47 +3857,31 @@ local function getInventory()
     end
 
     if
-        type(ClientData.get_data)
-        == "function"
+        type(
+            ClientData.get_data
+        ) == "function"
     then
 
-        local success, data =
+        local ok2,
+            data =
             pcall(
                 ClientData.get_data
             )
 
         if
-            success
+            ok2
             and type(data)
                 == "table"
         then
 
-            if type(data.inventory) == "table" then
-                return data.inventory
-            end
-
-            local mine =
-                data[
-                    tostring(
-                        LocalPlayer
-                    )
-                ]
-                or data[
-                    LocalPlayer.Name
-                ]
-                or data[
-                    tostring(
-                        LocalPlayer.UserId
-                    )
-                ]
-
             if
-                type(mine) == "table"
-                and type(mine.inventory)
-                    == "table"
+                type(
+                    data.inventory
+                ) == "table"
             then
 
-                return mine.inventory
+                return
+                    data.inventory
             end
         end
     end
@@ -1002,25 +3889,64 @@ local function getInventory()
     return nil
 end
 
+
+local function itemLocked(item)
+
+    if
+        item.locked == true
+        or item.is_locked == true
+    then
+
+        return true
+    end
+
+    if
+        type(
+            item.properties
+        ) == "table"
+        and (
+            item.properties.locked
+                == true
+            or item.properties.is_locked
+                == true
+        )
+    then
+
+        return true
+    end
+
+    return false
+end
+
+
 local function inventoryItems()
 
     local inventory =
         getInventory()
 
-    local result = {}
+    local result =
+        {}
+
+    local seen =
+        {}
 
     if type(inventory) ~= "table" then
-
         return result
     end
 
-    for category, bucket in pairs(
-        inventory
-    ) do
+    for category,
+        bucket in pairs(
+            inventory
+        )
+    do
 
         if type(bucket) == "table" then
 
-            for uid, raw in pairs(bucket) do
+            for uid,
+                raw in pairs(
+                    bucket
+                )
+            do
 
                 if type(raw) == "table" then
 
@@ -1029,32 +3955,39 @@ local function inventoryItems()
                             raw
                         )
 
-                    item.unique =
-                        item.unique
-                        or uid
-
                     item.category =
                         item.category
                         or category
 
-                    local properties =
-                        type(item.properties)
-                            == "table"
+                    item.unique =
+                        item.unique
+                        or item.uid
+                        or uid
 
-                        and item.properties
-                        or {}
-
-                    local locked =
-                        item.locked == true
-                        or item.is_locked == true
-                        or properties.locked == true
-
-                    if not locked then
-
-                        result[
-                            #result + 1
-                        ] =
+                    if
+                        item.kind
+                        and item.category
+                        and item.unique
+                        and not itemLocked(
                             item
+                        )
+                    then
+
+                        local key =
+                            tostring(
+                                item.unique
+                            )
+
+                        if not seen[key] then
+
+                            seen[key] =
+                                true
+
+                            result[
+                                #result + 1
+                            ] =
+                                item
+                        end
                     end
                 end
             end
@@ -1064,31 +3997,95 @@ local function inventoryItems()
     return result
 end
 
+
 --============================================================
--- VALUE OUR INVENTORY
+-- ALLOWED ITEMS
 --============================================================
+
+local function parseAllowed()
+
+    local text =
+        tostring(
+            Settings.allowedItems
+            or ""
+        )
+
+    text =
+        text:gsub(
+            "\n",
+            ","
+        )
+
+    text =
+        text:gsub(
+            ";",
+            ","
+        )
+
+    local result =
+        {}
+
+    for part in text:gmatch(
+        "[^,]+"
+    ) do
+
+        local key =
+            normalize(
+                part
+            )
+
+        if key ~= "" then
+            result[key] = true
+        end
+    end
+
+    return result
+end
+
+
+local function isAllowed(name)
+
+    local allowed =
+        parseAllowed()
+
+    if next(allowed) == nil then
+        return true
+    end
+
+    return
+
+        allowed[
+            normalize(
+                name
+            )
+        ]
+        == true
+end
+
 
 local function valuedInventory()
 
-    local result = {}
+    local result =
+        {}
 
-    for _, item in ipairs(
-        inventoryItems()
-    ) do
+    for _,
+        item in ipairs(
+            inventoryItems()
+        )
+    do
 
-        local valueData =
+        local data =
             effectiveItemValue(
                 item
             )
 
-        -- NEW <24H:
-        -- never automatically give away as showcase/final offer.
         if
-            valueData.known
-            and not valueData.newIgnored
-            and valueData.value > 0
-            and isAllowedName(
-                valueData.name
+            data.known
+            and not data.newIgnored
+            and not data.estimated
+            and data.value > 0
+            and isAllowed(
+                data.name
             )
         then
 
@@ -1096,18 +4093,26 @@ local function valuedInventory()
                 #result + 1
             ] = {
 
-                item = item,
+                item =
+                    item,
 
                 uid =
                     tostring(
-                        item.unique
+                        itemUID(
+                            item
+                        )
                     ),
 
                 name =
-                    valueData.name,
+                    data.name,
+
+                variant =
+                    getVariant(
+                        item
+                    ),
 
                 value =
-                    valueData.value,
+                    data.value,
             }
         end
     end
@@ -1125,102 +4130,100 @@ local function valuedInventory()
     return result
 end
 
---============================================================
--- SHOWCASE
--- Highest known, non-new, allowed item.
---============================================================
-
-local function getShowcaseCandidates()
-
-    return
-        valuedInventory()
-end
 
 --============================================================
--- COMBINATION OPTIMIZER
---
--- Find our highest total <= THEM / 1.10.
--- This gives a result as close as possible to +10%,
--- without intentionally reducing an already-good trade.
+-- OPTIMIZER
 --============================================================
 
 local function optimizeOurOffer(
-    theirsValue
+    theirValue
 )
 
-    local targetProfit =
+    local target =
         tonumber(
-            TestSettings.minProfitPercent
+            Settings.minProfitPercent
         )
         or 10
 
     local cap =
-        theirsValue
+        theirValue
         / (
             1
-            + targetProfit / 100
+            + target / 100
         )
 
     if cap <= 0 then
 
-        return {},
+        return
+            {},
             0,
             cap
     end
 
-    local candidates =
+    local all =
         valuedInventory()
 
-    local filtered = {}
+    local candidates =
+        {}
 
-    for _, candidate in ipairs(
-        candidates
-    ) do
+    for _,
+        candidate in ipairs(
+            all
+        )
+    do
 
-        if candidate.value <= cap then
+        if
+            candidate.value
+            <= cap
+        then
 
-            filtered[
-                #filtered + 1
+            candidates[
+                #candidates + 1
             ] =
                 candidate
         end
     end
 
-    if #filtered == 0 then
+    if #candidates == 0 then
 
-        return {},
+        return
+            {},
             0,
             cap
     end
 
-    -- Keep search reasonable on huge inventories.
-    if #filtered > 120 then
+    if #candidates > 140 then
 
-        local cut = {}
+        local cut =
+            {}
 
-        for i = 1, 120 do
-            cut[i] = filtered[i]
+        for i = 1, 140 do
+            cut[i] = candidates[i]
         end
 
-        filtered = cut
+        candidates =
+            cut
     end
 
     local beam = {
 
         {
-            total = 0,
-            list = {},
+            total =
+                0,
+
+            list =
+                {},
         }
     }
 
-    local beamWidth =
+    local width =
         math.max(
-            50,
+            80,
             math.floor(
                 tonumber(
-                    TestSettings.optimizerBeam
+                    Settings.optimizerBeam
                 )
-                or 300
+                or 350
             )
         )
 
@@ -1228,7 +4231,7 @@ local function optimizeOurOffer(
         math.clamp(
             math.floor(
                 tonumber(
-                    TestSettings.maxOurItems
+                    Settings.maxOurItems
                 )
                 or 18
             ),
@@ -1236,15 +4239,20 @@ local function optimizeOurOffer(
             18
         )
 
-    for _, candidate in ipairs(
-        filtered
-    ) do
+    for _,
+        candidate in ipairs(
+            candidates
+        )
+    do
 
-        local expanded = {}
+        local expanded =
+            {}
 
-        for _, state in ipairs(
-            beam
-        ) do
+        for _,
+            state in ipairs(
+                beam
+            )
+        do
 
             expanded[
                 #expanded + 1
@@ -1256,27 +4264,31 @@ local function optimizeOurOffer(
                 < maxItems
             then
 
-                local newTotal =
+                local total =
                     state.total
                     + candidate.value
 
                 if
-                    newTotal
+                    total
                     <= cap
                     + 0.000000001
                 then
 
-                    local newList = {}
+                    local list =
+                        {}
 
-                    for i, old in ipairs(
-                        state.list
-                    ) do
+                    for index,
+                        old in ipairs(
+                            state.list
+                        )
+                    do
 
-                        newList[i] = old
+                        list[index] =
+                            old
                     end
 
-                    newList[
-                        #newList + 1
+                    list[
+                        #list + 1
                     ] =
                         candidate
 
@@ -1285,10 +4297,10 @@ local function optimizeOurOffer(
                     ] = {
 
                         total =
-                            newTotal,
+                            total,
 
                         list =
-                            newList,
+                            list,
                     }
                 end
             end
@@ -1304,12 +4316,17 @@ local function optimizeOurOffer(
             end
         )
 
-        local unique = {}
-        local nextBeam = {}
+        local unique =
+            {}
 
-        for _, state in ipairs(
-            expanded
-        ) do
+        local nextBeam =
+            {}
+
+        for _,
+            state in ipairs(
+                expanded
+            )
+        do
 
             local key =
                 string.format(
@@ -1320,7 +4337,8 @@ local function optimizeOurOffer(
 
             if not unique[key] then
 
-                unique[key] = true
+                unique[key] =
+                    true
 
                 nextBeam[
                     #nextBeam + 1
@@ -1329,8 +4347,9 @@ local function optimizeOurOffer(
 
                 if
                     #nextBeam
-                    >= beamWidth
+                    >= width
                 then
+
                     break
                 end
             end
@@ -1338,21 +4357,6 @@ local function optimizeOurOffer(
 
         beam =
             nextBeam
-
-        if beam[1] then
-
-            local difference =
-                cap
-                - beam[1].total
-
-            if
-                difference
-                <= 0.000000001
-            then
-
-                break
-            end
-        end
     end
 
     local best =
@@ -1360,71 +4364,89 @@ local function optimizeOurOffer(
 
     if not best then
 
-        return {},
+        return
+            {},
             0,
             cap
     end
 
     return
+
         best.list,
         best.total,
         cap
 end
 
+
 --============================================================
--- OUR OFFER REMOTE CONTROL
+-- OFFER CONTROL
 --============================================================
+
+local function addOurItem(uid)
+
+    if not TradeRemote.Add then
+        return false
+    end
+
+    return
+        remoteCall(
+            TradeRemote.Add,
+            uid
+        )
+end
+
+
+local function removeOurItem(uid)
+
+    if not TradeRemote.Remove then
+        return false
+    end
+
+    return
+        remoteCall(
+            TradeRemote.Remove,
+            uid
+        )
+end
+
 
 local function currentUIDSet(offer)
 
-    local set = {}
+    local result =
+        {}
 
-    for _, item in pairs(
-        getOfferItems(offer)
-    ) do
+    for _,
+        item in pairs(
+            getOfferItems(
+                offer
+            )
+        )
+    do
 
-        if item.unique then
+        local uid =
+            itemUID(
+                item
+            )
 
-            set[
+        if uid then
+
+            result[
                 tostring(
-                    item.unique
+                    uid
                 )
             ] =
                 true
         end
     end
 
-    return set
+    return result
 end
 
-local function desiredUIDSet(list)
-
-    local set = {}
-
-    for _, candidate in ipairs(list) do
-
-        set[
-            tostring(
-                candidate.uid
-            )
-        ] =
-            true
-    end
-
-    return set
-end
 
 local function rebuildOurOffer(
     myOffer,
     desired
 )
-
-    if not TradeRemote.Add
-        or not TradeRemote.Remove
-    then
-
-        return false
-    end
 
     local current =
         currentUIDSet(
@@ -1432,46 +4454,58 @@ local function rebuildOurOffer(
         )
 
     local wanted =
-        desiredUIDSet(
+        {}
+
+    for _,
+        candidate in ipairs(
             desired
         )
+    do
 
-    -- REMOVE ITEMS THAT ARE NOT WANTED
-    for _, item in pairs(
-        getOfferItems(myOffer)
-    ) do
+        wanted[
+            candidate.uid
+        ] =
+            true
+    end
+
+    for _,
+        item in pairs(
+            getOfferItems(
+                myOffer
+            )
+        )
+    do
 
         local uid =
-            item.unique
-            and tostring(
-                item.unique
+            itemUID(
+                item
             )
 
-        if
-            uid
-            and not wanted[uid]
-        then
+        if uid then
 
-            testLog(
-                "REMOVE OUR:",
-                uid
-            )
+            uid =
+                tostring(
+                    uid
+                )
 
-            remoteCall(
-                TradeRemote.Remove,
-                uid
-            )
+            if not wanted[uid] then
 
-            task.wait(
-                0.18
-            )
+                removeOurItem(
+                    uid
+                )
+
+                task.wait(
+                    0.18
+                )
+            end
         end
     end
 
-    -- ADD MISSING ITEMS
-    for _, candidate in ipairs(
-        desired
-    ) do
+    for _,
+        candidate in ipairs(
+            desired
+        )
+    do
 
         if
             not current[
@@ -1479,15 +4513,7 @@ local function rebuildOurOffer(
             ]
         then
 
-            testLog(
-                "ADD OUR:",
-                candidate.name,
-                "=",
-                candidate.value
-            )
-
-            remoteCall(
-                TradeRemote.Add,
+            addOurItem(
                 candidate.uid
             )
 
@@ -1496,28 +4522,21 @@ local function rebuildOurOffer(
             )
         end
     end
-
-    return true
 end
+
 
 --============================================================
 -- CHAT
---
--- Does NOT bypass Roblox account/chat restrictions.
--- If chat isn't available, the trade continues without text.
 --============================================================
 
 local function sendChat(text)
 
-    if
-        TestSettings.chatRequests
-        ~= true
-    then
-
+    if not Settings.chatRequests then
         return false
     end
 
-    local sent = false
+    local sent =
+        false
 
     pcall(
         function()
@@ -1537,65 +4556,2142 @@ local function sendChat(text)
 
             if general then
 
-                general:SendAsync(
+                general:
+                SendAsync(
                     text
                 )
 
-                sent = true
+                sent =
+                    true
             end
         end
-    )
-
-    if not sent then
-
-        pcall(
-            function()
-
-                local events =
-                    RS:
-                    FindFirstChild(
-                        "DefaultChatSystemChatEvents"
-                    )
-
-                local remote =
-                    events
-                    and events:
-                    FindFirstChild(
-                        "SayMessageRequest"
-                    )
-
-                if remote then
-
-                    remote:FireServer(
-                        text,
-                        "All"
-                    )
-
-                    sent = true
-                end
-            end
-        )
-    end
-
-    testLog(
-        "CHAT:",
-        text,
-        "SENT=",
-        sent
     )
 
     return sent
 end
 
+
 --============================================================
--- ACCEPT / CONFIRM / DECLINE
+-- GUI MAIN
 --============================================================
+
+setBoot(
+    "3/9",
+    "BUILDING GUI"
+)
+
+
+local Gui =
+    Instance.new(
+        "ScreenGui"
+    )
+
+Gui.Name =
+    GUI_NAME
+
+Gui.ResetOnSpawn =
+    false
+
+Gui.DisplayOrder =
+    999999
+
+Gui.Parent =
+    GuiParent
+
+
+local Main =
+    Instance.new(
+        "Frame"
+    )
+
+Main.Size =
+    UDim2.new(
+        0.94,
+        0,
+        0.86,
+        0
+    )
+
+Main.Position =
+    UDim2.new(
+        0.03,
+        0,
+        0.06,
+        0
+    )
+
+Main.BackgroundColor3 =
+    C.BG
+
+Main.BorderSizePixel =
+    0
+
+Main.ClipsDescendants =
+    true
+
+Main.Parent =
+    Gui
+
+
+corner(
+    Main,
+    12
+)
+
+
+stroke(
+    Main,
+    0.15
+)
+
+
+local Top =
+    Instance.new(
+        "Frame"
+    )
+
+Top.Size =
+    UDim2.new(
+        1,
+        0,
+        0,
+        52
+    )
+
+Top.BackgroundColor3 =
+    C.TOP
+
+Top.BorderSizePixel =
+    0
+
+Top.Parent =
+    Main
+
+
+label(
+    Top,
+
+    "ADOPT ME  •  TRADE ANALYZER",
+
+    UDim2.new(
+        0,
+        390,
+        1,
+        0
+    ),
+
+    UDim2.fromOffset(
+        18,
+        0
+    ),
+
+    Enum.Font.GothamBold,
+    16,
+    C.TEXT
+)
+
+
+local VersionLabel =
+    label(
+        Top,
+
+        "V"
+        .. VERSION,
+
+        UDim2.fromOffset(
+            72,
+            25
+        ),
+
+        UDim2.new(
+            0,
+            310,
+            0.5,
+            -12
+        ),
+
+        Enum.Font.GothamBold,
+        10,
+        C.ACCENT,
+        Enum.TextXAlignment.Center
+    )
+
+
+VersionLabel.BackgroundTransparency =
+    0
+
+VersionLabel.BackgroundColor3 =
+    Color3.fromRGB(
+        35,
+        50,
+        80
+    )
+
+
+corner(
+    VersionLabel,
+    6
+)
+
+
+local CloseButton =
+    button(
+        Top,
+        "X",
+
+        UDim2.fromOffset(
+            40,
+            34
+        ),
+
+        UDim2.new(
+            1,
+            -50,
+            0,
+            9
+        )
+    )
+
+
+--============================================================
+-- DRAG
+--============================================================
+
+local dragging =
+    false
+
+local dragStart
+local dragOrigin
+
+
+Top.InputBegan:
+Connect(
+    function(input)
+
+        if
+            input.UserInputType
+                == Enum.UserInputType.Touch
+
+            or input.UserInputType
+                == Enum.UserInputType.MouseButton1
+        then
+
+            dragging =
+                true
+
+            dragStart =
+                input.Position
+
+            dragOrigin =
+                Main.Position
+        end
+    end
+)
+
+
+UIS.InputChanged:
+Connect(
+    function(input)
+
+        if not dragging then
+            return
+        end
+
+        if
+            input.UserInputType
+                ~= Enum.UserInputType.Touch
+
+            and input.UserInputType
+                ~= Enum.UserInputType.MouseMovement
+        then
+
+            return
+        end
+
+        local camera =
+            workspace.CurrentCamera
+
+        if not camera then
+            return
+        end
+
+        local viewport =
+            camera.ViewportSize
+
+        local delta =
+            input.Position
+            - dragStart
+
+        local x =
+            dragOrigin.X.Scale
+                * viewport.X
+            + dragOrigin.X.Offset
+            + delta.X
+
+        local y =
+            dragOrigin.Y.Scale
+                * viewport.Y
+            + dragOrigin.Y.Offset
+            + delta.Y
+
+        x =
+            math.clamp(
+                x,
+                0,
+                math.max(
+                    0,
+                    viewport.X
+                    - Main.AbsoluteSize.X
+                )
+            )
+
+        y =
+            math.clamp(
+                y,
+                0,
+                math.max(
+                    0,
+                    viewport.Y
+                    - Main.AbsoluteSize.Y
+                )
+            )
+
+        Main.Position =
+            UDim2.fromOffset(
+                x,
+                y
+            )
+    end
+)
+
+
+UIS.InputEnded:
+Connect(
+    function(input)
+
+        if
+            input.UserInputType
+                == Enum.UserInputType.Touch
+
+            or input.UserInputType
+                == Enum.UserInputType.MouseButton1
+        then
+
+            dragging =
+                false
+        end
+    end
+)
+
+
+--============================================================
+-- PAGE SYSTEM
+--============================================================
+
+local Sidebar =
+    Instance.new(
+        "Frame"
+    )
+
+Sidebar.Position =
+    UDim2.fromOffset(
+        0,
+        52
+    )
+
+Sidebar.Size =
+    UDim2.new(
+        0,
+        145,
+        1,
+        -52
+    )
+
+Sidebar.BackgroundColor3 =
+    C.SIDE
+
+Sidebar.BorderSizePixel =
+    0
+
+Sidebar.Parent =
+    Main
+
+
+label(
+    Sidebar,
+    "MENU",
+
+    UDim2.new(
+        1,
+        -20,
+        0,
+        30
+    ),
+
+    UDim2.fromOffset(
+        14,
+        10
+    ),
+
+    Enum.Font.GothamBold,
+    10,
+    C.MUTED
+)
+
+
+local Content =
+    Instance.new(
+        "Frame"
+    )
+
+Content.Position =
+    UDim2.fromOffset(
+        145,
+        52
+    )
+
+Content.Size =
+    UDim2.new(
+        1,
+        -145,
+        1,
+        -52
+    )
+
+Content.BackgroundTransparency =
+    1
+
+Content.Parent =
+    Main
+
+
+local Pages =
+    {}
+
+local Navigation =
+    {}
+
+
+local function createPage(name)
+
+    local page =
+        Instance.new(
+            "Frame"
+        )
+
+    page.Name =
+        name
+
+    page.Size =
+        UDim2.fromScale(
+            1,
+            1
+        )
+
+    page.BackgroundTransparency =
+        1
+
+    page.Visible =
+        false
+
+    page.Parent =
+        Content
+
+    Pages[name] =
+        page
+
+    return page
+end
+
+
+local function setPage(name)
+
+    for pageName,
+        page in pairs(
+            Pages
+        )
+    do
+
+        page.Visible =
+            pageName
+            == name
+    end
+
+    for buttonName,
+        navButton in pairs(
+            Navigation
+        )
+    do
+
+        if buttonName == name then
+
+            navButton.BackgroundColor3 =
+                Color3.fromRGB(
+                    48,
+                    76,
+                    130
+                )
+
+            navButton.TextColor3 =
+                C.TEXT
+
+        else
+
+            navButton.BackgroundColor3 =
+                C.PANEL
+
+            navButton.TextColor3 =
+                C.MUTED
+        end
+    end
+end
+
+
+local function nav(
+    name,
+    y
+)
+
+    local value =
+        button(
+            Sidebar,
+
+            "   "
+            .. name,
+
+            UDim2.new(
+                1,
+                -20,
+                0,
+                42
+            ),
+
+            UDim2.fromOffset(
+                10,
+                y
+            )
+        )
+
+    value.TextXAlignment =
+        Enum.TextXAlignment.Left
+
+    value.BackgroundColor3 =
+        C.PANEL
+
+    value.TextColor3 =
+        C.MUTED
+
+    value.Activated:
+    Connect(
+        function()
+
+            setPage(
+                name
+            )
+        end
+    )
+
+    Navigation[name] =
+        value
+end
+
+
+nav(
+    "TRADE",
+    46
+)
+
+nav(
+    "VALUES",
+    96
+)
+
+nav(
+    "UPDATES",
+    146
+)
+
+nav(
+    "SETTINGS",
+    196
+)
+
+nav(
+    "TEST",
+    246
+)
+
+
+--============================================================
+-- TRADE PAGE
+--============================================================
+
+local TradePage =
+    createPage(
+        "TRADE"
+    )
+
+
+label(
+    TradePage,
+    "LIVE TRADE",
+
+    UDim2.new(
+        1,
+        -30,
+        0,
+        32
+    ),
+
+    UDim2.fromOffset(
+        16,
+        8
+    ),
+
+    Enum.Font.GothamBold,
+    19,
+    C.TEXT
+)
+
+
+local TradeStatus =
+    label(
+        TradePage,
+        "WAITING FOR TRADE",
+
+        UDim2.new(
+            1,
+            -30,
+            0,
+            26
+        ),
+
+        UDim2.fromOffset(
+            16,
+            42
+        ),
+
+        Enum.Font.Code,
+        11,
+        C.MUTED
+    )
+
+
+local TradeInfo =
+    textBox(
+        TradePage,
+        "",
+        "",
+
+        UDim2.new(
+            1,
+            -30,
+            1,
+            -100
+        ),
+
+        UDim2.fromOffset(
+            15,
+            72
+        )
+    )
+
+
+TradeInfo.MultiLine =
+    true
+
+TradeInfo.TextEditable =
+    true
+
+TradeInfo.TextWrapped =
+    false
+
+TradeInfo.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+TradeInfo.TextYAlignment =
+    Enum.TextYAlignment.Top
+
+TradeInfo.Font =
+    Enum.Font.Code
+
+TradeInfo.TextSize =
+    10
+
+
+--============================================================
+-- VALUES PAGE
+--============================================================
+
+local ValuesPage =
+    createPage(
+        "VALUES"
+    )
+
+
+label(
+    ValuesPage,
+    "AMVGG VALUES",
+
+    UDim2.new(
+        1,
+        -30,
+        0,
+        32
+    ),
+
+    UDim2.fromOffset(
+        16,
+        8
+    ),
+
+    Enum.Font.GothamBold,
+    19,
+    C.TEXT
+)
+
+
+local SearchBox =
+    textBox(
+        ValuesPage,
+        "",
+        "Search...",
+
+        UDim2.new(
+            1,
+            -30,
+            0,
+            34
+        ),
+
+        UDim2.fromOffset(
+            15,
+            48
+        )
+    )
+
+
+local SearchResult =
+    textBox(
+        ValuesPage,
+        "",
+        "",
+
+        UDim2.new(
+            1,
+            -30,
+            1,
+            -105
+        ),
+
+        UDim2.fromOffset(
+            15,
+            92
+        )
+    )
+
+
+SearchResult.MultiLine =
+    true
+
+SearchResult.TextEditable =
+    true
+
+SearchResult.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+SearchResult.TextYAlignment =
+    Enum.TextYAlignment.Top
+
+SearchResult.Font =
+    Enum.Font.Code
+
+SearchResult.TextSize =
+    10
+
+
+local function rebuildSearch()
+
+    if not AMVGG.ready then
+
+        SearchResult.Text =
+            "AMVGG NOT READY"
+
+        return
+    end
+
+    local query =
+        normalize(
+            SearchBox.Text
+        )
+
+    local rows =
+        {}
+
+    for source,
+        database in pairs(
+            AMVGG.categories
+        )
+    do
+
+        for _,
+            entry in pairs(
+                database
+            )
+        do
+
+            local name =
+                tostring(
+                    entry.name
+                    or ""
+                )
+
+            if
+                query == ""
+                or normalize(name):
+                    find(
+                        query,
+                        1,
+                        true
+                    )
+            then
+
+                local value =
+                    num(
+                        entry.regularValue
+                    )
+                    or num(
+                        entry.value
+                    )
+                    or num(
+                        entry.npRegularValue
+                    )
+
+                rows[
+                    #rows + 1
+                ] = {
+
+                    name =
+                        name,
+
+                    source =
+                        source,
+
+                    value =
+                        value,
+                }
+            end
+        end
+    end
+
+    table.sort(
+        rows,
+        function(a, b)
+
+            return
+                (
+                    a.value
+                    or -999
+                )
+                >
+                (
+                    b.value
+                    or -999
+                )
+        end
+    )
+
+    local lines =
+        {}
+
+    for i = 1,
+        math.min(
+            #rows,
+            100
+        )
+    do
+
+        local row =
+            rows[i]
+
+        lines[
+            #lines + 1
+        ] =
+            row.name
+            .. "  ["
+            .. row.source
+            .. "]  = "
+            .. valueText(
+                row.value
+            )
+    end
+
+    SearchResult.Text =
+        table.concat(
+            lines,
+            "\n"
+        )
+end
+
+
+SearchBox:
+GetPropertyChangedSignal(
+    "Text"
+):
+Connect(
+    function()
+
+        task.delay(
+            0.15,
+            rebuildSearch
+        )
+    end
+)
+
+
+--============================================================
+-- UPDATES PAGE
+--============================================================
+
+local UpdatesPage =
+    createPage(
+        "UPDATES"
+    )
+
+
+label(
+    UpdatesPage,
+    "AMVGG UPDATE STATUS",
+
+    UDim2.new(
+        1,
+        -30,
+        0,
+        32
+    ),
+
+    UDim2.fromOffset(
+        16,
+        8
+    ),
+
+    Enum.Font.GothamBold,
+    19,
+    C.TEXT
+)
+
+
+local UpdatesText =
+    textBox(
+        UpdatesPage,
+        "",
+        "",
+
+        UDim2.new(
+            1,
+            -30,
+            0,
+            300
+        ),
+
+        UDim2.fromOffset(
+            15,
+            52
+        )
+    )
+
+
+UpdatesText.MultiLine =
+    true
+
+UpdatesText.TextEditable =
+    true
+
+UpdatesText.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+UpdatesText.TextYAlignment =
+    Enum.TextYAlignment.Top
+
+UpdatesText.Font =
+    Enum.Font.Code
+
+
+local RefreshButton =
+    button(
+        UpdatesPage,
+        "REFRESH NOW",
+
+        UDim2.fromOffset(
+            180,
+            36
+        ),
+
+        UDim2.fromOffset(
+            15,
+            368
+        )
+    )
+
+
+local function updateStatusPage()
+
+    local lines = {
+
+        "READY = "
+        .. tostring(
+            AMVGG.ready
+        ),
+
+        "LOADING = "
+        .. tostring(
+            AMVGG.loading
+        ),
+
+        "VERSION = "
+        .. tostring(
+            AMVGG.version
+        ),
+
+        "TOTAL = "
+        .. tostring(
+            AMVGG.total
+        ),
+
+        "",
+    }
+
+    for _,
+        slug in ipairs(
+            CATEGORY_URLS
+        )
+    do
+
+        lines[
+            #lines + 1
+        ] =
+            slug
+            .. " = "
+            .. tostring(
+                AMVGG.counts[
+                    slug
+                ]
+                or 0
+            )
+    end
+
+    if AMVGG.error then
+
+        lines[
+            #lines + 1
+        ] =
+            ""
+
+        lines[
+            #lines + 1
+        ] =
+            "ERROR = "
+            .. AMVGG.error
+    end
+
+    UpdatesText.Text =
+        table.concat(
+            lines,
+            "\n"
+        )
+end
+
+
+RefreshButton.Activated:
+Connect(
+    function()
+
+        task.spawn(
+            function()
+
+                refresh()
+
+                updateFirstSeen()
+
+                updateStatusPage()
+
+                rebuildSearch()
+            end
+        )
+    end
+)
+
+
+--============================================================
+-- SETTINGS PAGE
+--============================================================
+
+local SettingsPage =
+    createPage(
+        "SETTINGS"
+    )
+
+
+label(
+    SettingsPage,
+    "SETTINGS",
+
+    UDim2.new(
+        1,
+        -30,
+        0,
+        32
+    ),
+
+    UDim2.fromOffset(
+        16,
+        8
+    ),
+
+    Enum.Font.GothamBold,
+    19,
+    C.TEXT
+)
+
+
+local RefreshSetting =
+    textBox(
+        SettingsPage,
+        Settings.refreshMinutes,
+        "5",
+
+        UDim2.fromOffset(
+            100,
+            32
+        ),
+
+        UDim2.fromOffset(
+            220,
+            60
+        )
+    )
+
+
+label(
+    SettingsPage,
+    "AMVGG REFRESH MINUTES",
+
+    UDim2.fromOffset(
+        195,
+        32
+    ),
+
+    UDim2.fromOffset(
+        16,
+        60
+    ),
+
+    Enum.Font.GothamBold,
+    10,
+    C.MUTED
+)
+
+
+local EstimatedToggle =
+    button(
+        SettingsPage,
+        "",
+
+        UDim2.fromOffset(
+            260,
+            36
+        ),
+
+        UDim2.fromOffset(
+            16,
+            110
+        )
+    )
+
+
+local function renderEstimated()
+
+    EstimatedToggle.Text =
+        "BLOCK ESTIMATED VALUES: "
+        .. (
+            Settings.blockEstimated
+            and "ON"
+            or "OFF"
+        )
+
+    EstimatedToggle.BackgroundColor3 =
+        Settings.blockEstimated
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+end
+
+
+EstimatedToggle.Activated:
+Connect(
+    function()
+
+        Settings.blockEstimated =
+            not Settings.blockEstimated
+
+        saveSettings()
+
+        renderEstimated()
+    end
+)
+
+
+RefreshSetting.FocusLost:
+Connect(
+    function()
+
+        local value =
+            tonumber(
+                RefreshSetting.Text
+            )
+
+        if value then
+
+            Settings.refreshMinutes =
+                math.clamp(
+                    value,
+                    1,
+                    120
+                )
+
+            saveSettings()
+        end
+    end
+)
+
+
+renderEstimated()
+
+
+--============================================================
+-- TEST PAGE
+--============================================================
+
+local TestPage =
+    createPage(
+        "TEST"
+    )
+
+
+label(
+    TestPage,
+    "TEST / AUTO TRADE",
+
+    UDim2.new(
+        1,
+        -30,
+        0,
+        32
+    ),
+
+    UDim2.fromOffset(
+        16,
+        8
+    ),
+
+    Enum.Font.GothamBold,
+    19,
+    C.TEXT
+)
+
+
+local TestStatus =
+    label(
+        TestPage,
+        "STATUS: OFF",
+
+        UDim2.new(
+            1,
+            -30,
+            0,
+            24
+        ),
+
+        UDim2.fromOffset(
+            16,
+            40
+        ),
+
+        Enum.Font.Code,
+        10,
+        C.MUTED
+    )
+
+
+local TestScroll =
+    makeScroll(
+        TestPage,
+
+        UDim2.new(
+            1,
+            -30,
+            1,
+            -78
+        ),
+
+        UDim2.fromOffset(
+            15,
+            66
+        )
+    )
+
+
+local TestCanvas =
+    Instance.new(
+        "Frame"
+    )
+
+TestCanvas.Size =
+    UDim2.new(
+        1,
+        -10,
+        0,
+        850
+    )
+
+TestCanvas.BackgroundTransparency =
+    1
+
+TestCanvas.Parent =
+    TestScroll
+
+
+local TestToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.fromOffset(
+            180,
+            36
+        ),
+
+        UDim2.fromOffset(
+            10,
+            10
+        )
+    )
+
+
+local AutoToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.fromOffset(
+            180,
+            36
+        ),
+
+        UDim2.fromOffset(
+            200,
+            10
+        )
+    )
+
+
+local function renderModes()
+
+    TestToggle.Text =
+        "TEST AUTO ACCEPT: "
+        .. (
+            Settings.testAutoAccept
+            and "ON"
+            or "OFF"
+        )
+
+    AutoToggle.Text =
+        "AUTO TRADE: "
+        .. (
+            Settings.autoTrade
+            and "ON"
+            or "OFF"
+        )
+
+    TestToggle.BackgroundColor3 =
+        Settings.testAutoAccept
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+
+    AutoToggle.BackgroundColor3 =
+        Settings.autoTrade
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+end
+
+
+TestToggle.Activated:
+Connect(
+    function()
+
+        Settings.testAutoAccept =
+            not Settings.testAutoAccept
+
+        if Settings.testAutoAccept then
+            Settings.autoTrade = false
+        end
+
+        saveSettings()
+
+        renderModes()
+    end
+)
+
+
+AutoToggle.Activated:
+Connect(
+    function()
+
+        Settings.autoTrade =
+            not Settings.autoTrade
+
+        if Settings.autoTrade then
+            Settings.testAutoAccept = false
+        end
+
+        saveSettings()
+
+        renderModes()
+    end
+)
+
+
+renderModes()
+
+
+local function settingInput(
+    title,
+    value,
+    y
+)
+
+    label(
+        TestCanvas,
+        title,
+
+        UDim2.fromOffset(
+            210,
+            30
+        ),
+
+        UDim2.fromOffset(
+            12,
+            y
+        ),
+
+        Enum.Font.GothamBold,
+        10,
+        C.MUTED
+    )
+
+    return
+        textBox(
+            TestCanvas,
+            value,
+            "",
+
+            UDim2.fromOffset(
+                110,
+                30
+            ),
+
+            UDim2.fromOffset(
+                245,
+                y
+            )
+        )
+end
+
+
+local ProfitInput =
+    settingInput(
+        "MIN PROFIT %",
+        Settings.minProfitPercent,
+        65
+    )
+
+
+local AddTimeoutInput =
+    settingInput(
+        "ADD TIMEOUT",
+        Settings.addTimeout,
+        103
+    )
+
+
+local FirstTimeoutInput =
+    settingInput(
+        "FIRST ITEM TIMEOUT",
+        Settings.firstItemTimeout,
+        141
+    )
+
+
+local RequestTimeoutInput =
+    settingInput(
+        "REQUEST TIMEOUT",
+        Settings.requestTimeout,
+        179
+    )
+
+
+local CooldownInput =
+    settingInput(
+        "PLAYER COOLDOWN",
+        Settings.playerCooldown,
+        217
+    )
+
+
+local NewHoursInput =
+    settingInput(
+        "NEW ITEM HOURS",
+        Settings.newItemHours,
+        255
+    )
+
+
+local function bindNumber(
+    input,
+    key,
+    min,
+    max
+)
+
+    input.FocusLost:
+    Connect(
+        function()
+
+            local value =
+                tonumber(
+                    input.Text
+                )
+
+            if not value then
+
+                input.Text =
+                    tostring(
+                        Settings[key]
+                    )
+
+                return
+            end
+
+            Settings[key] =
+                math.clamp(
+                    value,
+                    min,
+                    max
+                )
+
+            input.Text =
+                tostring(
+                    Settings[key]
+                )
+
+            saveSettings()
+        end
+    )
+end
+
+
+bindNumber(
+    ProfitInput,
+    "minProfitPercent",
+    0,
+    500
+)
+
+
+bindNumber(
+    AddTimeoutInput,
+    "addTimeout",
+    5,
+    300
+)
+
+
+bindNumber(
+    FirstTimeoutInput,
+    "firstItemTimeout",
+    5,
+    180
+)
+
+
+bindNumber(
+    RequestTimeoutInput,
+    "requestTimeout",
+    5,
+    90
+)
+
+
+bindNumber(
+    CooldownInput,
+    "playerCooldown",
+    10,
+    7200
+)
+
+
+bindNumber(
+    NewHoursInput,
+    "newItemHours",
+    1,
+    168
+)
+
+
+label(
+    TestCanvas,
+    "ALLOWED ITEMS • blank = all",
+
+    UDim2.fromOffset(
+        360,
+        24
+    ),
+
+    UDim2.fromOffset(
+        12,
+        300
+    ),
+
+    Enum.Font.GothamBold,
+    10,
+    C.MUTED
+)
+
+
+local AllowedInput =
+    textBox(
+        TestCanvas,
+
+        Settings.allowedItems,
+
+        "Frost Dragon, Owl, Turtle...",
+
+        UDim2.new(
+            1,
+            -30,
+            0,
+            60
+        ),
+
+        UDim2.fromOffset(
+            12,
+            326
+        )
+    )
+
+
+AllowedInput.MultiLine =
+    true
+
+AllowedInput.TextWrapped =
+    true
+
+
+AllowedInput.FocusLost:
+Connect(
+    function()
+
+        Settings.allowedItems =
+            AllowedInput.Text
+
+        saveSettings()
+    end
+)
+
+
+local ChatToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.fromOffset(
+            180,
+            36
+        ),
+
+        UDim2.fromOffset(
+            10,
+            398
+        )
+    )
+
+
+local ScanInventory =
+    button(
+        TestCanvas,
+        "SCAN INVENTORY",
+
+        UDim2.fromOffset(
+            180,
+            36
+        ),
+
+        UDim2.fromOffset(
+            200,
+            398
+        )
+    )
+
+
+local function renderChat()
+
+    ChatToggle.Text =
+        "CHAT REQUEST: "
+        .. (
+            Settings.chatRequests
+            and "ON"
+            or "OFF"
+        )
+end
+
+
+ChatToggle.Activated:
+Connect(
+    function()
+
+        Settings.chatRequests =
+            not Settings.chatRequests
+
+        saveSettings()
+
+        renderChat()
+    end
+)
+
+
+renderChat()
+
+
+local TestLogs =
+    {}
+
+
+local function testLog(...)
+
+    local parts =
+        {}
+
+    for index,
+        value in ipairs(
+            {...}
+        )
+    do
+
+        parts[index] =
+            tostring(
+                value
+            )
+    end
+
+    local text =
+        table.concat(
+            parts,
+            " "
+        )
+
+    TestLogs[
+        #TestLogs + 1
+    ] =
+        os.date(
+            "%H:%M:%S"
+        )
+        .. " "
+        .. text
+
+    if #TestLogs > 80 then
+
+        table.remove(
+            TestLogs,
+            1
+        )
+    end
+
+    print(
+        "[AUTO]",
+        text
+    )
+end
+
+
+local LogBox =
+    textBox(
+        TestCanvas,
+        "",
+        "",
+
+        UDim2.new(
+            1,
+            -30,
+            0,
+            300
+        ),
+
+        UDim2.fromOffset(
+            12,
+            455
+        )
+    )
+
+
+LogBox.MultiLine =
+    true
+
+LogBox.TextEditable =
+    true
+
+LogBox.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+LogBox.TextYAlignment =
+    Enum.TextYAlignment.Top
+
+LogBox.Font =
+    Enum.Font.Code
+
+LogBox.TextSize =
+    9
+
+
+local function setTestStatus(
+    text,
+    color
+)
+
+    TestStatus.Text =
+        "STATUS: "
+        .. tostring(
+            text
+        )
+
+    TestStatus.TextColor3 =
+        color
+        or C.MUTED
+end
+
+
+ScanInventory.Activated:
+Connect(
+    function()
+
+        task.spawn(
+            function()
+
+                local list =
+                    valuedInventory()
+
+                testLog(
+                    "SAFE INVENTORY =",
+                    #list
+                )
+
+                for i = 1,
+                    math.min(
+                        #list,
+                        15
+                    )
+                do
+
+                    local item =
+                        list[i]
+
+                    testLog(
+                        "#"
+                        .. i,
+                        item.name,
+                        item.variant,
+                        "=",
+                        valueText(
+                            item.value
+                        )
+                    )
+                end
+
+                if list[1] then
+
+                    testLog(
+                        "SHOWCASE =",
+                        list[1].name,
+                        valueText(
+                            list[1].value
+                        )
+                    )
+                end
+            end
+        )
+    end
+)
+
+
+--============================================================
+-- AUTO STATE
+--============================================================
+
+local State = {
+
+    target =
+        nil,
+
+    requestStarted =
+        nil,
+
+    tradeID =
+        nil,
+
+    tradeStarted =
+        nil,
+
+    partner =
+        nil,
+
+    lastSignature =
+        nil,
+
+    changedAt =
+        nil,
+
+    acceptedSignature =
+        nil,
+
+    optimizedSignature =
+        nil,
+
+    askStarted =
+        nil,
+
+    askSignature =
+        nil,
+
+    initialAsk =
+        false,
+
+    declineSent =
+        false,
+
+    showcaseTried =
+        {},
+}
+
+
+local PlayerCooldowns =
+    {}
+
+
+local function resetState()
+
+    State.target =
+        nil
+
+    State.requestStarted =
+        nil
+
+    State.tradeID =
+        nil
+
+    State.tradeStarted =
+        nil
+
+    State.partner =
+        nil
+
+    State.lastSignature =
+        nil
+
+    State.changedAt =
+        nil
+
+    State.acceptedSignature =
+        nil
+
+    State.optimizedSignature =
+        nil
+
+    State.askStarted =
+        nil
+
+    State.askSignature =
+        nil
+
+    State.initialAsk =
+        false
+
+    State.declineSent =
+        false
+
+    State.showcaseTried =
+        {}
+end
+
+
+local function cooldown(player)
+
+    if typeof(player) ~= "Instance" then
+        return
+    end
+
+    PlayerCooldowns[
+        player.UserId
+    ] =
+        os.clock()
+        + Settings.playerCooldown
+end
+
+
+local function randomPlayer()
+
+    local list =
+        {}
+
+    local now =
+        os.clock()
+
+    for _,
+        player in ipairs(
+            Players:GetPlayers()
+        )
+    do
+
+        if
+            player ~= LocalPlayer
+            and now
+                >= (
+                    PlayerCooldowns[
+                        player.UserId
+                    ]
+                    or 0
+                )
+        then
+
+            list[
+                #list + 1
+            ] =
+                player
+        end
+    end
+
+    if #list == 0 then
+        return nil
+    end
+
+    return
+        list[
+            math.random(
+                1,
+                #list
+            )
+        ]
+end
+
+
+--============================================================
+-- SEND TRADE
+--============================================================
+
+local function sendTrade(player)
+
+    if
+        not TradeRemote.SendRequest
+        or not player
+    then
+
+        return false
+    end
+
+    local ok =
+        remoteCall(
+            TradeRemote.SendRequest,
+            player
+        )
+
+    if ok then
+        return true
+    end
+
+    ok =
+        remoteCall(
+            TradeRemote.SendRequest,
+            player.Name
+        )
+
+    if ok then
+        return true
+    end
+
+    ok =
+        remoteCall(
+            TradeRemote.SendRequest,
+            player.UserId
+        )
+
+    return ok
+end
+
+
+--============================================================
+-- ACCEPT FLAGS
+--============================================================
+
+local function accepted(offer)
+
+    return
+
+        type(offer) == "table"
+
+        and (
+            offer.negotiated
+                == true
+
+            or offer.accepted
+                == true
+
+            or offer.is_accepted
+                == true
+        )
+end
+
+
+local function confirmed(offer)
+
+    return
+
+        type(offer) == "table"
+
+        and (
+            offer.confirmed
+                == true
+
+            or offer.is_confirmed
+                == true
+        )
+end
+
 
 local function unaccept(myOffer)
 
     if
-        type(myOffer) == "table"
-        and myOffer.negotiated == true
+        accepted(
+            myOffer
+        )
         and TradeRemote.Unaccept
     then
 
@@ -1609,7 +6705,8 @@ local function unaccept(myOffer)
     end
 end
 
-local function declineTrade()
+
+local function decline()
 
     if TradeRemote.Decline then
 
@@ -1623,1024 +6720,12 @@ local function declineTrade()
     end
 end
 
---============================================================
--- TEST PAGE GUI
---============================================================
-
-local TestPage =
-    createPage(
-        "TEST"
-    )
-
-nav(
-    "TEST",
-    246
-)
-
-label(
-    TestPage,
-
-    "TEST / AUTO TRADE",
-
-    UDim2.new(
-        1,
-        -30,
-        0,
-        34
-    ),
-
-    UDim2.fromOffset(
-        16,
-        7
-    ),
-
-    Enum.Font.GothamBold,
-    19,
-    C.TEXT
-)
-
-local TestStatus =
-    label(
-        TestPage,
-
-        "STATUS: OFF",
-
-        UDim2.new(
-            1,
-            -32,
-            0,
-            22
-        ),
-
-        UDim2.fromOffset(
-            17,
-            39
-        ),
-
-        Enum.Font.Code,
-        10,
-        C.MUTED
-    )
-
-local TestScroll =
-    Instance.new(
-        "ScrollingFrame"
-    )
-
-TestScroll.Position =
-    UDim2.fromOffset(
-        15,
-        67
-    )
-
-TestScroll.Size =
-    UDim2.new(
-        1,
-        -30,
-        1,
-        -82
-    )
-
-TestScroll.BackgroundColor3 =
-    C.PANEL
-
-TestScroll.BorderSizePixel =
-    0
-
-TestScroll.CanvasSize =
-    UDim2.fromOffset(
-        0,
-        680
-    )
-
-TestScroll.ScrollBarThickness =
-    6
-
-TestScroll.Parent =
-    TestPage
-
-corner(
-    TestScroll,
-    9
-)
-
-local function testButton(
-    text,
-    x,
-    y,
-    width
-)
-
-    return
-        button(
-            TestScroll,
-
-            text,
-
-            UDim2.fromOffset(
-                width,
-                34
-            ),
-
-            UDim2.fromOffset(
-                x,
-                y
-            )
-        )
-end
-
-local function settingBox(
-    titleText,
-    value,
-    y
-)
-
-    label(
-        TestScroll,
-
-        titleText,
-
-        UDim2.new(
-            0.46,
-            0,
-            0,
-            30
-        ),
-
-        UDim2.fromOffset(
-            15,
-            y
-        ),
-
-        Enum.Font.GothamBold,
-        10,
-        C.MUTED
-    )
-
-    local box =
-        Instance.new(
-            "TextBox"
-        )
-
-    box.Size =
-        UDim2.new(
-            0.30,
-            0,
-            0,
-            30
-        )
-
-    box.Position =
-        UDim2.new(
-            0.54,
-            0,
-            0,
-            y
-        )
-
-    box.BackgroundColor3 =
-        C.PANEL2
-
-    box.BorderSizePixel =
-        0
-
-    box.Text =
-        tostring(value)
-
-    box.TextColor3 =
-        C.TEXT
-
-    box.Font =
-        Enum.Font.Code
-
-    box.TextSize =
-        10
-
-    box.ClearTextOnFocus =
-        false
-
-    box.Parent =
-        TestScroll
-
-    corner(
-        box,
-        6
-    )
-
-    return box
-end
 
 --============================================================
--- MODE BUTTONS
+-- TRADE EVALUATION
 --============================================================
 
-local TestToggle =
-    testButton(
-        "",
-        15,
-        10,
-        175
-    )
-
-local AutoToggle =
-    testButton(
-        "",
-        200,
-        10,
-        175
-    )
-
-local function renderModeButtons()
-
-    TestToggle.Text =
-        "TEST AUTO ACCEPT: "
-        .. (
-            TestSettings.testAutoAccept
-            and "ON"
-            or "OFF"
-        )
-
-    AutoToggle.Text =
-        "AUTO TRADE: "
-        .. (
-            TestSettings.autoTrade
-            and "ON"
-            or "OFF"
-        )
-
-    TestToggle.BackgroundColor3 =
-        TestSettings.testAutoAccept
-        and Color3.fromRGB(
-            40,
-            105,
-            70
-        )
-        or C.PANEL2
-
-    AutoToggle.BackgroundColor3 =
-        TestSettings.autoTrade
-        and Color3.fromRGB(
-            40,
-            105,
-            70
-        )
-        or C.PANEL2
-end
-
-TestToggle.Activated:Connect(
-    function()
-
-        TestSettings.testAutoAccept =
-            not TestSettings.testAutoAccept
-
-        if TestSettings.testAutoAccept then
-
-            TestSettings.autoTrade =
-                false
-        end
-
-        saveTestSettings()
-        renderModeButtons()
-    end
-)
-
-AutoToggle.Activated:Connect(
-    function()
-
-        TestSettings.autoTrade =
-            not TestSettings.autoTrade
-
-        if TestSettings.autoTrade then
-
-            TestSettings.testAutoAccept =
-                false
-        end
-
-        saveTestSettings()
-        renderModeButtons()
-    end
-)
-
-renderModeButtons()
-
---============================================================
--- NUMBER SETTINGS
---============================================================
-
-local ProfitBox =
-    settingBox(
-        "MIN PROFIT %",
-        TestSettings.minProfitPercent,
-        58
-    )
-
-local AddTimeoutBox =
-    settingBox(
-        "ADD TIMEOUT SEC",
-        TestSettings.addTimeout,
-        96
-    )
-
-local FirstItemBox =
-    settingBox(
-        "WAIT FIRST ITEM SEC",
-        TestSettings.firstItemTimeout,
-        134
-    )
-
-local RequestBox =
-    settingBox(
-        "TRADE REQUEST SEC",
-        TestSettings.requestTimeout,
-        172
-    )
-
-local CooldownBox =
-    settingBox(
-        "PLAYER COOLDOWN SEC",
-        TestSettings.playerCooldown,
-        210
-    )
-
-local RefreshBox =
-    settingBox(
-        "AMVGG REFRESH MIN",
-        TestSettings.refreshMinutes,
-        248
-    )
-
-local NewHoursBox =
-    settingBox(
-        "NEW ITEM IGNORE HOURS",
-        TestSettings.newItemHours,
-        286
-    )
-
-local function bindNumber(
-    box,
-    key,
-    minValue,
-    maxValue
-)
-
-    box.FocusLost:Connect(
-        function()
-
-            local value =
-                tonumber(
-                    box.Text
-                )
-
-            if not value then
-
-                box.Text =
-                    tostring(
-                        TestSettings[key]
-                    )
-
-                return
-            end
-
-            value =
-                math.clamp(
-                    value,
-                    minValue,
-                    maxValue
-                )
-
-            TestSettings[key] =
-                value
-
-            box.Text =
-                tostring(value)
-
-            saveTestSettings()
-        end
-    )
-end
-
-bindNumber(
-    ProfitBox,
-    "minProfitPercent",
-    0,
-    500
-)
-
-bindNumber(
-    AddTimeoutBox,
-    "addTimeout",
-    5,
-    300
-)
-
-bindNumber(
-    FirstItemBox,
-    "firstItemTimeout",
-    5,
-    120
-)
-
-bindNumber(
-    RequestBox,
-    "requestTimeout",
-    5,
-    60
-)
-
-bindNumber(
-    CooldownBox,
-    "playerCooldown",
-    10,
-    3600
-)
-
-bindNumber(
-    RefreshBox,
-    "refreshMinutes",
-    1,
-    120
-)
-
-bindNumber(
-    NewHoursBox,
-    "newItemHours",
-    1,
-    168
-)
-
---============================================================
--- ALLOWED ITEMS
---============================================================
-
-label(
-    TestScroll,
-
-    "ALLOWED ITEMS (blank = ALL)",
-
-    UDim2.new(
-        1,
-        -30,
-        0,
-        24
-    ),
-
-    UDim2.fromOffset(
-        15,
-        328
-    ),
-
-    Enum.Font.GothamBold,
-    10,
-    C.MUTED
-)
-
-local AllowedBox =
-    Instance.new(
-        "TextBox"
-    )
-
-AllowedBox.Size =
-    UDim2.new(
-        1,
-        -30,
-        0,
-        55
-    )
-
-AllowedBox.Position =
-    UDim2.fromOffset(
-        15,
-        353
-    )
-
-AllowedBox.BackgroundColor3 =
-    C.PANEL2
-
-AllowedBox.BorderSizePixel =
-    0
-
-AllowedBox.Text =
-    tostring(
-        TestSettings.allowedItems
-        or ""
-    )
-
-AllowedBox.PlaceholderText =
-    "blank = all | Frost Dragon, Owl, Turtle..."
-
-AllowedBox.PlaceholderColor3 =
-    C.MUTED
-
-AllowedBox.TextColor3 =
-    C.TEXT
-
-AllowedBox.Font =
-    Enum.Font.Code
-
-AllowedBox.TextSize =
-    9
-
-AllowedBox.MultiLine =
-    true
-
-AllowedBox.ClearTextOnFocus =
-    false
-
-AllowedBox.TextWrapped =
-    true
-
-AllowedBox.Parent =
-    TestScroll
-
-corner(
-    AllowedBox,
-    6
-)
-
-AllowedBox.FocusLost:Connect(
-    function()
-
-        TestSettings.allowedItems =
-            AllowedBox.Text
-
-        saveTestSettings()
-    end
-)
-
---============================================================
--- CHAT TOGGLE
---============================================================
-
-local ChatToggle =
-    testButton(
-        "",
-        15,
-        418,
-        175
-    )
-
-local function renderChat()
-
-    ChatToggle.Text =
-        "REQUEST CHAT: "
-        .. (
-            TestSettings.chatRequests
-            and "ON"
-            or "OFF"
-        )
-
-    ChatToggle.BackgroundColor3 =
-        TestSettings.chatRequests
-        and Color3.fromRGB(
-            40,
-            105,
-            70
-        )
-        or C.PANEL2
-end
-
-ChatToggle.Activated:Connect(
-    function()
-
-        TestSettings.chatRequests =
-            not TestSettings.chatRequests
-
-        saveTestSettings()
-        renderChat()
-    end
-)
-
-renderChat()
-
---============================================================
--- INVENTORY BUTTON
---============================================================
-
-local InventoryButton =
-    testButton(
-        "SCAN INVENTORY",
-        200,
-        418,
-        175
-    )
-
---============================================================
--- TEST LOG BOX
---============================================================
-
-local TestLogBox =
-    Instance.new(
-        "TextBox"
-    )
-
-TestLogBox.Size =
-    UDim2.new(
-        1,
-        -30,
-        0,
-        145
-    )
-
-TestLogBox.Position =
-    UDim2.fromOffset(
-        15,
-        462
-    )
-
-TestLogBox.BackgroundColor3 =
-    Color3.fromRGB(
-        8,
-        10,
-        15
-    )
-
-TestLogBox.BorderSizePixel =
-    0
-
-TestLogBox.Text =
-    ""
-
-TestLogBox.TextColor3 =
-    C.TEXT
-
-TestLogBox.Font =
-    Enum.Font.Code
-
-TestLogBox.TextSize =
-    8
-
-TestLogBox.TextXAlignment =
-    Enum.TextXAlignment.Left
-
-TestLogBox.TextYAlignment =
-    Enum.TextYAlignment.Top
-
-TestLogBox.TextEditable =
-    true
-
-TestLogBox.ClearTextOnFocus =
-    false
-
-TestLogBox.MultiLine =
-    true
-
-TestLogBox.TextWrapped =
-    false
-
-TestLogBox.Parent =
-    TestScroll
-
-corner(
-    TestLogBox,
-    6
-)
-
-task.spawn(
-    function()
-
-        while Gui.Parent do
-
-            TestLogBox.Text =
-                table.concat(
-                    TestLogs,
-                    "\n"
-                )
-
-            task.wait(
-                0.75
-            )
-        end
-    end
-)
-
-InventoryButton.Activated:Connect(
-    function()
-
-        task.spawn(
-            function()
-
-                testLog(
-                    "SCANNING INVENTORY..."
-                )
-
-                local list =
-                    valuedInventory()
-
-                testLog(
-                    "KNOWN ALLOWED ITEMS:",
-                    #list
-                )
-
-                for i = 1, math.min(
-                    10,
-                    #list
-                ) do
-
-                    testLog(
-                        "#"
-                        .. tostring(i),
-                        list[i].name,
-                        "=",
-                        list[i].value
-                    )
-                end
-
-                if list[1] then
-
-                    testLog(
-                        "SHOWCASE:",
-                        list[1].name,
-                        "=",
-                        list[1].value
-                    )
-                end
-            end
-        )
-    end
-)
-
---============================================================
--- STATUS
---============================================================
-
-local function setTestStatus(
-    text,
-    color
-)
-
-    TestStatus.Text =
-        "STATUS: "
-        .. tostring(text)
-
-    TestStatus.TextColor3 =
-        color
-        or C.MUTED
-end
-
---============================================================
--- AUTO STATE
---============================================================
-
-local State = {
-
-    mode =
-        "IDLE",
-
-    target =
-        nil,
-
-    requestStarted =
-        nil,
-
-    currentTradeID =
-        nil,
-
-    tradeStarted =
-        nil,
-
-    lastSignature =
-        nil,
-
-    offerChangedAt =
-        nil,
-
-    showcaseTried =
-        {},
-
-    showcaseSent =
-        false,
-
-    initialAskSent =
-        false,
-
-    askStarted =
-        nil,
-
-    askSignature =
-        nil,
-
-    acceptedSignature =
-        nil,
-
-    optimizedSignature =
-        nil,
-
-    declineSent =
-        false,
-
-    lastUnknownRefresh =
-        0,
-}
-
-local PlayerCooldowns = {}
-
-local function resetTradeState()
-
-    State.currentTradeID =
-        nil
-
-    State.tradeStarted =
-        nil
-
-    State.lastSignature =
-        nil
-
-    State.offerChangedAt =
-        nil
-
-    State.showcaseTried =
-        {}
-
-    State.showcaseSent =
-        false
-
-    State.initialAskSent =
-        false
-
-    State.askStarted =
-        nil
-
-    State.askSignature =
-        nil
-
-    State.acceptedSignature =
-        nil
-
-    State.optimizedSignature =
-        nil
-
-    State.declineSent =
-        false
-end
-
---============================================================
--- RANDOM PLAYER
---============================================================
-
-local function chooseRandomPlayer()
-
-    local candidates = {}
-
-    local now =
-        os.clock()
-
-    for _, player in ipairs(
-        Players:GetPlayers()
-    ) do
-
-        if player ~= LocalPlayer then
-
-            local untilTime =
-                PlayerCooldowns[
-                    player.UserId
-                ]
-                or 0
-
-            if now >= untilTime then
-
-                candidates[
-                    #candidates + 1
-                ] =
-                    player
-            end
-        end
-    end
-
-    if #candidates == 0 then
-        return nil
-    end
-
-    return
-        candidates[
-            math.random(
-                1,
-                #candidates
-            )
-        ]
-end
-
-local function cooldownPlayer(player)
-
-    if not player then
-        return
-    end
-
-    PlayerCooldowns[
-        player.UserId
-    ] =
-        os.clock()
-        + (
-            tonumber(
-                TestSettings.playerCooldown
-            )
-            or 300
-        )
-end
-
---============================================================
--- SEND RANDOM TRADE
---============================================================
-
-local function sendTradeRequest(player)
-
-    if not TradeRemote.SendRequest then
-
-        setTestStatus(
-            "SEND TRADE REMOTE MISSING",
-            C.RED
-        )
-
-        testLog(
-            "TradeAPI/SendTradeRequest missing"
-        )
-
-        return false
-    end
-
-    testLog(
-        "TRADE REQUEST ->",
-        player.Name
-    )
-
-    local ok =
-        remoteCall(
-            TradeRemote.SendRequest,
-            player
-        )
-
-    return ok
-end
-
---============================================================
--- SHOWCASE HIGHEST ITEM
---============================================================
-
-local function tryShowcase(myOffer)
-
-    if
-        countOfferItems(
-            myOffer
-        ) > 0
-    then
-
-        State.showcaseSent =
-            true
-
-        return true
-    end
-
-    local candidates =
-        getShowcaseCandidates()
-
-    if #candidates == 0 then
-
-        setTestStatus(
-            "NO SHOWCASE ITEM",
-            C.RED
-        )
-
-        return false
-    end
-
-    for _, candidate in ipairs(
-        candidates
-    ) do
-
-        if
-            not State.showcaseTried[
-                candidate.uid
-            ]
-        then
-
-            State.showcaseTried[
-                candidate.uid
-            ] =
-                true
-
-            testLog(
-                "SHOWCASE:",
-                candidate.name,
-                "=",
-                candidate.value
-            )
-
-            remoteCall(
-                TradeRemote.Add,
-                candidate.uid
-            )
-
-            return true
-        end
-    end
-
-    return false
-end
-
---============================================================
--- VERIFY TRADE FOR ACCEPT/CONFIRM
---============================================================
-
-local function evaluateCurrentTrade(
+local function evaluateTrade(
     myOffer,
     theirOffer
 )
@@ -2657,20 +6742,52 @@ local function evaluateCurrentTrade(
 
     local result = {
 
-        mine = mine,
+        mine =
+            mine,
 
-        theirs = theirs,
+        theirs =
+            theirs,
 
-        valid = false,
+        blocked =
+            false,
 
-        profit = nil,
+        valid =
+            false,
+
+        reason =
+            nil,
+
+        profit =
+            nil,
     }
 
-    -- Unknown = never trust.
     if
         mine.unknown > 0
         or theirs.unknown > 0
     then
+
+        result.blocked =
+            true
+
+        result.reason =
+            "UNKNOWN"
+
+        return result
+    end
+
+    if
+        Settings.blockEstimated
+        and (
+            mine.estimated > 0
+            or theirs.estimated > 0
+        )
+    then
+
+        result.blocked =
+            true
+
+        result.reason =
+            "ESTIMATED"
 
         return result
     end
@@ -2684,35 +6801,35 @@ local function evaluateCurrentTrade(
     if result.profit then
 
         result.valid =
+
             result.profit
-            >= (
-                tonumber(
-                    TestSettings.minProfitPercent
-                )
-                or 10
-            )
+            >= Settings.minProfitPercent
     end
 
     return result
 end
 
+
 --============================================================
--- ACCEPT OR CONFIRM
+-- SECURE ACCEPT / CONFIRM
 --============================================================
 
-local function secureAcceptOrConfirm(
+local function secureAccept(
     trade,
     myOffer,
     theirOffer
 )
 
     local evaluation =
-        evaluateCurrentTrade(
+        evaluateTrade(
             myOffer,
             theirOffer
         )
 
-    if not evaluation.valid then
+    if
+        evaluation.blocked
+        or not evaluation.valid
+    then
 
         unaccept(
             myOffer
@@ -2725,7 +6842,7 @@ local function secureAcceptOrConfirm(
     end
 
     local signature =
-        completeOfferSignature(
+        fullSignature(
             myOffer,
             theirOffer
         )
@@ -2733,22 +6850,29 @@ local function secureAcceptOrConfirm(
     local stage =
         tostring(
             trade.current_stage
+            or trade.stage
+            or trade.state
             or ""
-        ):lower()
+        ):
+        lower()
 
-    --========================================================
-    -- FINAL CONFIRM
-    --========================================================
+    local confirmStage =
 
-    if
         stage:find(
             "confirm",
             1,
             true
         )
-    then
+        ~= nil
 
-        -- Must still be EXACT SAME offer we accepted.
+        or trade.confirming
+            == true
+
+        or trade.confirmation_started
+            == true
+
+    if confirmStage then
+
         if
             State.acceptedSignature
             and State.acceptedSignature
@@ -2756,7 +6880,7 @@ local function secureAcceptOrConfirm(
         then
 
             testLog(
-                "OFFER CHANGED BEFORE CONFIRM"
+                "CHANGED BEFORE CONFIRM"
             )
 
             unaccept(
@@ -2769,47 +6893,67 @@ local function secureAcceptOrConfirm(
             return false
         end
 
-        testLog(
-            "FINAL RECHECK:",
-            string.format(
-                "+%.2f%%",
-                evaluation.profit
-            ),
-            "NEW IGNORED:",
-            evaluation.mine.newIgnored
-            + evaluation.theirs.newIgnored
-        )
+        local final =
+            evaluateTrade(
+                myOffer,
+                theirOffer
+            )
 
         if
-            not myOffer.confirmed
+            final.blocked
+            or not final.valid
+        then
+
+            testLog(
+                "FINAL CHECK FAILED"
+            )
+
+            unaccept(
+                myOffer
+            )
+
+            State.acceptedSignature =
+                nil
+
+            return false
+        end
+
+        if
+            not confirmed(
+                myOffer
+            )
             and TradeRemote.Confirm
         then
 
-            remoteCall(
-                TradeRemote.Confirm
+            testLog(
+                "CONFIRM +",
+                string.format(
+                    "%.2f%%",
+                    final.profit
+                )
             )
 
-            testLog(
-                "CONFIRM TRADE"
+            remoteCall(
+                TradeRemote.Confirm
             )
         end
 
         return true
     end
 
-    --========================================================
-    -- NEGOTIATION ACCEPT
-    --========================================================
-
-    if not myOffer.negotiated then
+    if
+        not accepted(
+            myOffer
+        )
+    then
 
         State.acceptedSignature =
             signature
 
         testLog(
-            "ACCEPT:",
+            "ACCEPT +",
             string.format(
-                "+%.2f%%",
+                "%.2f%%",
                 evaluation.profit
             )
         )
@@ -2822,67 +6966,98 @@ local function secureAcceptOrConfirm(
     return true
 end
 
+
 --============================================================
--- UNKNOWN REFRESH
+-- SHOWCASE
 --============================================================
 
-local function refreshUnknown()
+local function showcase(myOffer)
 
     if
-        os.clock()
-        - State.lastUnknownRefresh
-        < 20
+        countOfferItems(
+            myOffer
+        ) > 0
     then
 
-        return
+        return true
     end
 
-    State.lastUnknownRefresh =
-        os.clock()
+    local inventory =
+        valuedInventory()
 
-    task.spawn(
-        function()
+    if #inventory == 0 then
+
+        testLog(
+            "NO SAFE SHOWCASE"
+        )
+
+        return false
+    end
+
+    for _,
+        item in ipairs(
+            inventory
+        )
+    do
+
+        if
+            not State.showcaseTried[
+                item.uid
+            ]
+        then
+
+            State.showcaseTried[
+                item.uid
+            ] =
+                true
 
             testLog(
-                "UNKNOWN -> AMVGG REFRESH"
+                "SHOWCASE",
+                item.name,
+                item.variant,
+                "=",
+                valueText(
+                    item.value
+                )
             )
 
-            refresh()
-
-            task.wait(
-                1
-            )
-
-            updateFirstSeen()
+            return
+                addOurItem(
+                    item.uid
+                )
         end
-    )
+    end
+
+    return false
 end
+
 
 --============================================================
 -- TEST AUTO ACCEPT
---
--- Manual trade:
--- >= target = accept
--- below target = decline
---
--- New <24h items are ignored.
--- Unknown items block.
 --============================================================
 
-local TestHandledTrade
+local TestBadSignature =
+    nil
 
-local function runTestMode()
+local TestBadSince =
+    nil
+
+
+local function runTestAutoAccept()
 
     local trade =
         getTrade()
 
     if not trade then
 
-        TestHandledTrade =
+        TestBadSignature =
+            nil
+
+        TestBadSince =
             nil
 
         setTestStatus(
-            "TEST WAITING FOR TRADE",
+            "WAITING FOR TRADE",
             C.MUTED
         )
 
@@ -2899,88 +7074,66 @@ local function runTestMode()
         not myOffer
         or not theirOffer
     then
+
         return
     end
 
-    local tradeID =
-        tostring(
-            trade.trade_id
-            or trade.id
-            or trade
-        )
-
-    local mine =
-        evaluateOffer(
-            myOffer
-        )
-
-    local theirs =
-        evaluateOffer(
+    local evaluation =
+        evaluateTrade(
+            myOffer,
             theirOffer
         )
 
-    if
-        mine.unknown > 0
-        or theirs.unknown > 0
-    then
+    if evaluation.blocked then
 
         unaccept(
             myOffer
         )
 
         setTestStatus(
-            "TEST UNKNOWN VALUE",
+            "BLOCK "
+            .. tostring(
+                evaluation.reason
+            ),
             C.RED
         )
 
-        refreshUnknown()
+        return
+    end
+
+    if evaluation.valid then
+
+        TestBadSignature =
+            nil
+
+        TestBadSince =
+            nil
+
+        setTestStatus(
+            string.format(
+                "WIN +%.2f%%",
+                evaluation.profit
+            ),
+            C.GREEN
+        )
+
+        secureAccept(
+            trade,
+            myOffer,
+            theirOffer
+        )
 
         return
     end
 
     if
-        theirs.count == 0
-        or mine.count == 0
+        evaluation.mine.count == 0
+        or evaluation.theirs.count == 0
     then
 
         setTestStatus(
-            "TEST WAITING OFFER",
+            "WAITING ITEMS",
             C.YELLOW
-        )
-
-        return
-    end
-
-    local profit =
-        profitPercent(
-            mine.total,
-            theirs.total
-        )
-
-    if not profit then
-        return
-    end
-
-    local target =
-        tonumber(
-            TestSettings.minProfitPercent
-        )
-        or 10
-
-    if profit >= target then
-
-        setTestStatus(
-            string.format(
-                "TEST WIN +%.2f%%",
-                profit
-            ),
-            C.GREEN
-        )
-
-        secureAcceptOrConfirm(
-            trade,
-            myOffer,
-            theirOffer
         )
 
         return
@@ -2990,32 +7143,53 @@ local function runTestMode()
         myOffer
     )
 
+    local signature =
+        fullSignature(
+            myOffer,
+            theirOffer
+        )
+
+    if
+        TestBadSignature
+        ~= signature
+    then
+
+        TestBadSignature =
+            signature
+
+        TestBadSince =
+            os.clock()
+    end
+
     setTestStatus(
-        string.format(
-            "TEST LOSE %.2f%% -> DECLINE",
-            profit
-        ),
+        "LOSE • DECLINE",
         C.RED
     )
 
-    if TestHandledTrade ~= tradeID then
+    if
+        TestBadSince
+        and os.clock()
+            - TestBadSince
+            >= 2.5
+    then
 
-        TestHandledTrade =
-            tradeID
+        decline()
 
-        declineTrade()
+        TestBadSince =
+            nil
     end
 end
 
+
 --============================================================
--- MANAGE ACTIVE AUTO TRADE
+-- ACTIVE AUTO TRADE
 --============================================================
 
 local function manageAutoTrade(trade)
 
     local myOffer,
         theirOffer,
-        me,
+        _,
         partner =
         getTradeSides(
             trade
@@ -3029,54 +7203,52 @@ local function manageAutoTrade(trade)
         return
     end
 
-    local tradeID =
+    local id =
         tostring(
             trade.trade_id
             or trade.id
-            or playerName(partner)
+            or playerName(
+                partner
+            )
         )
 
-    --========================================================
-    -- NEW TRADE
-    --========================================================
-
     if
-        State.currentTradeID
-        ~= tradeID
+        State.tradeID
+        ~= id
     then
 
-        resetTradeState()
+        local oldTarget =
+            State.target
 
-        State.currentTradeID =
-            tradeID
+        resetState()
+
+        State.target =
+            oldTarget
+
+        State.tradeID =
+            id
 
         State.tradeStarted =
             os.clock()
 
-        State.offerChangedAt =
+        State.partner =
+            partner
+
+        State.changedAt =
             os.clock()
 
         testLog(
-            "ACTIVE TRADE:",
-            playerName(partner)
+            "TRADE START",
+            playerName(
+                partner
+            )
         )
     end
 
-    --========================================================
-    -- MAX TRADE TIME
-    --========================================================
-
     if
-        State.tradeStarted
-        and os.clock()
-            - State.tradeStarted
-            >
-            (
-                tonumber(
-                    TestSettings.maxTradeSeconds
-                )
-                or 120
-            )
+        os.clock()
+        - State.tradeStarted
+        > Settings.maxTradeSeconds
     then
 
         if not State.declineSent then
@@ -3084,23 +7256,14 @@ local function manageAutoTrade(trade)
             State.declineSent =
                 true
 
-            setTestStatus(
-                "TRADE TIMEOUT",
-                C.RED
-            )
-
-            declineTrade()
+            decline()
         end
 
         return
     end
 
-    --========================================================
-    -- OFFER CHANGE DETECTION
-    --========================================================
-
     local signature =
-        completeOfferSignature(
+        fullSignature(
             myOffer,
             theirOffer
         )
@@ -3110,8 +7273,6 @@ local function manageAutoTrade(trade)
         ~= signature
     then
 
-        -- If they changed anything after our ACCEPT,
-        -- revoke our acceptance.
         if
             State.acceptedSignature
             and State.acceptedSignature
@@ -3119,7 +7280,7 @@ local function manageAutoTrade(trade)
         then
 
             testLog(
-                "CHANGE AFTER ACCEPT -> UNACCEPT"
+                "CHANGED AFTER ACCEPT"
             )
 
             unaccept(
@@ -3133,8 +7294,11 @@ local function manageAutoTrade(trade)
         State.lastSignature =
             signature
 
-        State.offerChangedAt =
+        State.changedAt =
             os.clock()
+
+        State.optimizedSignature =
+            nil
     end
 
     local myCount =
@@ -3147,33 +7311,27 @@ local function manageAutoTrade(trade)
             theirOffer
         )
 
-    --========================================================
-    -- SHOW MOST EXPENSIVE ITEM
-    --========================================================
-
+    -- SHOW MOST EXPENSIVE SAFE ITEM
     if myCount == 0 then
 
         setTestStatus(
-            "ADDING SHOWCASE",
+            "SHOWCASE",
             C.YELLOW
         )
 
-        tryShowcase(
+        showcase(
             myOffer
         )
 
         return
     end
 
-    --========================================================
-    -- ASK PLAYER TO SHOW SOMETHING
-    --========================================================
-
+    -- WAIT FOR THEM
     if theirCount == 0 then
 
-        if not State.initialAskSent then
+        if not State.initialAsk then
 
-            State.initialAskSent =
+            State.initialAsk =
                 true
 
             sendChat(
@@ -3181,71 +7339,47 @@ local function manageAutoTrade(trade)
             )
 
             testLog(
-                "WAITING FOR THEIR FIRST ITEM"
+                "ASK FIRST ITEM"
             )
         end
 
         local elapsed =
             os.clock()
-            - (
-                State.tradeStarted
-                or os.clock()
-            )
-
-        local timeout =
-            tonumber(
-                TestSettings.firstItemTimeout
-            )
-            or 25
+            - State.tradeStarted
 
         setTestStatus(
-            "WAIT THEIR ITEM "
-            .. tostring(
-                math.max(
-                    0,
-                    math.ceil(
-                        timeout
-                        - elapsed
-                    )
+            "WAIT ITEM "
+            .. math.max(
+                0,
+                math.ceil(
+                    Settings.firstItemTimeout
+                    - elapsed
                 )
             )
             .. "s",
             C.YELLOW
         )
 
-        if elapsed >= timeout then
+        if
+            elapsed
+            >= Settings.firstItemTimeout
+            and not State.declineSent
+        then
 
-            if not State.declineSent then
+            State.declineSent =
+                true
 
-                State.declineSent =
-                    true
-
-                declineTrade()
-
-                cooldownPlayer(
-                    partner
-                )
-            end
+            decline()
         end
 
         return
     end
 
-    --========================================================
-    -- WAIT UNTIL OFFER STOPS MOVING
-    --========================================================
-
+    -- STABILIZE OFFER
     if
-        State.offerChangedAt
-        and os.clock()
-            - State.offerChangedAt
-            <
-            (
-                tonumber(
-                    TestSettings.settleSeconds
-                )
-                or 2
-            )
+        os.clock()
+        - State.changedAt
+        < Settings.settleSeconds
     then
 
         setTestStatus(
@@ -3256,109 +7390,58 @@ local function manageAutoTrade(trade)
         return
     end
 
-    --========================================================
-    -- VALUE CURRENT TRADE
-    --========================================================
-
-    local mine =
-        evaluateOffer(
-            myOffer
-        )
-
-    local theirs =
-        evaluateOffer(
+    local evaluation =
+        evaluateTrade(
+            myOffer,
             theirOffer
         )
 
-    --========================================================
-    -- UNKNOWN = BLOCK
-    --========================================================
-
-    if
-        mine.unknown > 0
-        or theirs.unknown > 0
-    then
+    if evaluation.blocked then
 
         unaccept(
             myOffer
         )
 
         setTestStatus(
-            "UNKNOWN ITEM - WAIT AMVGG",
+            "BLOCK "
+            .. tostring(
+                evaluation.reason
+            ),
             C.RED
         )
-
-        testLog(
-            "UNKNOWN MINE=",
-            mine.unknown,
-            "THEIRS=",
-            theirs.unknown
-        )
-
-        refreshUnknown()
 
         return
     end
 
-    --========================================================
-    -- NEW <24H
-    --========================================================
-
     if
-        mine.newIgnored > 0
-        or theirs.newIgnored > 0
+        evaluation.mine.newIgnored > 0
+        or evaluation.theirs.newIgnored > 0
     then
 
         testLog(
-            "NEW <24H IGNORED:",
-            "MINE=",
-            mine.newIgnored,
-            "THEIRS=",
-            theirs.newIgnored
+            "NEW <24H IGNORED",
+            "YOU=",
+            evaluation.mine.newIgnored,
+            "THEM=",
+            evaluation.theirs.newIgnored
         )
     end
 
-    local profit =
-        profitPercent(
-            mine.total,
-            theirs.total
-        )
-
-    local target =
-        tonumber(
-            TestSettings.minProfitPercent
-        )
-        or 10
-
-    --========================================================
-    -- ALREADY >= TARGET
-    --
-    -- IMPORTANT:
-    -- DON'T intentionally add more of our pets just to make
-    -- +30% become exactly +10%.
-    -- Anything >= target is already a WIN.
-    --========================================================
-
-    if
-        profit
-        and profit >= target
-    then
+    -- ALREADY WIN
+    if evaluation.valid then
 
         State.askStarted =
-            nil
-
-        State.askSignature =
             nil
 
         setTestStatus(
             string.format(
                 "WIN +%.2f%%",
-                profit
+                evaluation.profit
             ),
             C.GREEN
         )
 
-        secureAcceptOrConfirm(
+        secureAccept(
             trade,
             myOffer,
             theirOffer
@@ -3367,18 +7450,13 @@ local function manageAutoTrade(trade)
         return
     end
 
-    --========================================================
-    -- CURRENT OFFER NOT GOOD ENOUGH
-    --
-    -- Rebuild our offer as close as possible to +10%.
-    --========================================================
-
     unaccept(
         myOffer
     )
 
+    -- OPTIMIZE OUR SIDE
     local theirSignature =
-        offerOnlySignature(
+        offerSignature(
             theirOffer
         )
 
@@ -3391,32 +7469,31 @@ local function manageAutoTrade(trade)
             theirSignature
 
         local desired,
-            desiredValue,
+            ourValue,
             cap =
             optimizeOurOffer(
-                theirs.total
+                evaluation.theirs.total
             )
 
         if
             #desired > 0
-            and desiredValue > 0
+            and ourValue > 0
         then
 
             testLog(
-                "OPTIMIZER:",
-                "THEIRS=",
-                theirs.total,
-                "MAX OURS=",
-                cap,
-                "SELECTED=",
-                desiredValue,
-                "ITEMS=",
-                #desired
-            )
-
-            setTestStatus(
-                "REBUILDING OUR OFFER",
-                C.YELLOW
+                "OPTIMIZE",
+                "THEM=",
+                valueText(
+                    evaluation.theirs.total
+                ),
+                "CAP=",
+                valueText(
+                    cap
+                ),
+                "OURS=",
+                valueText(
+                    ourValue
+                )
             )
 
             rebuildOurOffer(
@@ -3424,47 +7501,32 @@ local function manageAutoTrade(trade)
                 desired
             )
 
-            State.offerChangedAt =
+            State.changedAt =
                 os.clock()
 
             return
-        else
-
-            testLog(
-                "OPTIMIZER: NO OUR COMBO <= ",
-                cap
-            )
         end
     end
 
-    --========================================================
-    -- AFTER OPTIMIZATION STILL NOT +10:
-    -- REQUEST ADD
-    --========================================================
-
-    local currentTheirSignature =
-        offerOnlySignature(
-            theirOffer
-        )
-
+    -- ASK ADD
     if
         not State.askStarted
         or State.askSignature
-            ~= currentTheirSignature
+            ~= theirSignature
     then
 
         State.askStarted =
             os.clock()
 
         State.askSignature =
-            currentTheirSignature
+            theirSignature
 
         sendChat(
             "please add a little"
         )
 
         testLog(
-            "ASK ADD START"
+            "ASK ADD"
         )
     end
 
@@ -3472,49 +7534,32 @@ local function manageAutoTrade(trade)
         os.clock()
         - State.askStarted
 
-    local timeout =
-        tonumber(
-            TestSettings.addTimeout
-        )
-        or 40
-
-    local remaining =
-        math.max(
-            0,
-            timeout
-            - elapsed
-        )
-
     setTestStatus(
-        "ASK ADD • "
-        .. tostring(
+        "ASK ADD "
+        .. math.max(
+            0,
             math.ceil(
-                remaining
+                Settings.addTimeout
+                - elapsed
             )
         )
         .. "s",
         C.YELLOW
     )
 
-    if elapsed >= timeout then
+    if
+        elapsed
+        >= Settings.addTimeout
+        and not State.declineSent
+    then
 
-        if not State.declineSent then
+        State.declineSent =
+            true
 
-            State.declineSent =
-                true
-
-            testLog(
-                "ADD TIMEOUT"
-            )
-
-            declineTrade()
-
-            cooldownPlayer(
-                partner
-            )
-        end
+        decline()
     end
 end
+
 
 --============================================================
 -- AUTO TRADE MAIN
@@ -3525,20 +7570,10 @@ local function runAutoTrade()
     local trade =
         getTrade()
 
-    --========================================================
-    -- ACTIVE TRADE
-    --========================================================
-
     if trade then
-
-        State.target =
-            nil
 
         State.requestStarted =
             nil
-
-        State.mode =
-            "TRADE"
 
         manageAutoTrade(
             trade
@@ -3547,62 +7582,61 @@ local function runAutoTrade()
         return
     end
 
-    --========================================================
-    -- PREVIOUS TRADE FINISHED
-    --========================================================
+    if State.tradeID then
 
-    if State.currentTradeID then
+        if
+            typeof(
+                State.partner
+            ) == "Instance"
+        then
 
-        resetTradeState()
+            cooldown(
+                State.partner
+            )
+        end
 
-        State.mode =
-            "IDLE"
+        resetState()
     end
-
-    --========================================================
-    -- WAIT FOR SENT REQUEST
-    --========================================================
 
     if
         State.target
         and State.requestStarted
     then
 
+        if
+            not State.target.Parent
+        then
+
+            resetState()
+
+            return
+        end
+
         local elapsed =
             os.clock()
             - State.requestStarted
-
-        local timeout =
-            tonumber(
-                TestSettings.requestTimeout
-            )
-            or 15
 
         setTestStatus(
             "WAIT "
             .. State.target.Name
             .. " "
-            .. tostring(
-                math.max(
-                    0,
-                    math.ceil(
-                        timeout
-                        - elapsed
-                    )
+            .. math.max(
+                0,
+                math.ceil(
+                    Settings.requestTimeout
+                    - elapsed
                 )
             )
             .. "s",
             C.YELLOW
         )
 
-        if elapsed >= timeout then
+        if
+            elapsed
+            >= Settings.requestTimeout
+        then
 
-            testLog(
-                "REQUEST TIMEOUT:",
-                State.target.Name
-            )
-
-            cooldownPlayer(
+            cooldown(
                 State.target
             )
 
@@ -3611,29 +7645,18 @@ local function runAutoTrade()
 
             State.requestStarted =
                 nil
-
-            State.mode =
-                "IDLE"
-
-            task.wait(
-                1
-            )
         end
 
         return
     end
 
-    --========================================================
-    -- SEND REQUEST TO RANDOM PLAYER
-    --========================================================
-
     local target =
-        chooseRandomPlayer()
+        randomPlayer()
 
     if not target then
 
         setTestStatus(
-            "NO AVAILABLE PLAYER",
+            "NO PLAYER",
             C.YELLOW
         )
 
@@ -3646,23 +7669,28 @@ local function runAutoTrade()
     State.requestStarted =
         os.clock()
 
-    State.mode =
-        "REQUEST"
-
     setTestStatus(
         "REQUEST -> "
         .. target.Name,
         C.YELLOW
     )
 
-    local sent =
-        sendTradeRequest(
+    testLog(
+        "REQUEST",
+        target.Name
+    )
+
+    if
+        not sendTrade(
             target
         )
+    then
 
-    if not sent then
+        testLog(
+            "REQUEST FAILED"
+        )
 
-        cooldownPlayer(
+        cooldown(
             target
         )
 
@@ -3671,31 +7699,516 @@ local function runAutoTrade()
 
         State.requestStarted =
             nil
-
-        task.wait(
-            2
-        )
     end
 end
 
+
 --============================================================
--- MASTER LOOP
+-- LIVE TRADE DISPLAY
 --============================================================
+
+local function updateTradeDisplay()
+
+    local trade =
+        getTrade()
+
+    if not trade then
+
+        TradeStatus.Text =
+            "WAITING FOR TRADE"
+
+        TradeStatus.TextColor3 =
+            C.MUTED
+
+        TradeInfo.Text =
+            ""
+
+        return
+    end
+
+    local myOffer,
+        theirOffer,
+        _,
+        partner =
+        getTradeSides(
+            trade
+        )
+
+    if
+        not myOffer
+        or not theirOffer
+    then
+
+        return
+    end
+
+    local mine =
+        evaluateOffer(
+            myOffer
+        )
+
+    local theirs =
+        evaluateOffer(
+            theirOffer
+        )
+
+    local lines = {
+
+        "PARTNER: "
+        .. playerName(
+            partner
+        ),
+
+        "",
+
+        "========== YOU ==========",
+    }
+
+    for index,
+        itemData in ipairs(
+            mine.items
+        )
+    do
+
+        local data =
+            itemData.data
+
+        local value
+
+        if data.newIgnored then
+
+            value =
+                "NEW<24H IGNORE"
+
+        elseif not data.known then
+
+            value =
+                "UNKNOWN"
+
+        elseif data.estimated then
+
+            value =
+                "~"
+                .. valueText(
+                    data.value
+                )
+
+        else
+
+            value =
+                valueText(
+                    data.value
+                )
+        end
+
+        lines[
+            #lines + 1
+        ] =
+            tostring(index)
+            .. ". "
+            .. data.name
+            .. " "
+            .. getVariant(
+                itemData.raw
+            )
+            .. " = "
+            .. value
+    end
+
+    lines[
+        #lines + 1
+    ] =
+        "YOU TOTAL = "
+        .. valueText(
+            mine.total
+        )
+
+    lines[
+        #lines + 1
+    ] =
+        ""
+
+    lines[
+        #lines + 1
+    ] =
+        "========== THEM =========="
+
+    for index,
+        itemData in ipairs(
+            theirs.items
+        )
+    do
+
+        local data =
+            itemData.data
+
+        local value
+
+        if data.newIgnored then
+
+            value =
+                "NEW<24H IGNORE"
+
+        elseif not data.known then
+
+            value =
+                "UNKNOWN"
+
+        elseif data.estimated then
+
+            value =
+                "~"
+                .. valueText(
+                    data.value
+                )
+
+        else
+
+            value =
+                valueText(
+                    data.value
+                )
+        end
+
+        lines[
+            #lines + 1
+        ] =
+            tostring(index)
+            .. ". "
+            .. data.name
+            .. " "
+            .. getVariant(
+                itemData.raw
+            )
+            .. " = "
+            .. value
+    end
+
+    lines[
+        #lines + 1
+    ] =
+        "THEM TOTAL = "
+        .. valueText(
+            theirs.total
+        )
+
+    TradeInfo.Text =
+        table.concat(
+            lines,
+            "\n"
+        )
+
+    if
+        mine.unknown > 0
+        or theirs.unknown > 0
+    then
+
+        TradeStatus.Text =
+            "UNKNOWN • BLOCK"
+
+        TradeStatus.TextColor3 =
+            C.RED
+
+        return
+    end
+
+    if
+        Settings.blockEstimated
+        and (
+            mine.estimated > 0
+            or theirs.estimated > 0
+        )
+    then
+
+        TradeStatus.Text =
+            "ESTIMATED • BLOCK"
+
+        TradeStatus.TextColor3 =
+            C.ORANGE
+
+        return
+    end
+
+    local profit =
+        profitPercent(
+            mine.total,
+            theirs.total
+        )
+
+    if not profit then
+
+        TradeStatus.Text =
+            "WAITING"
+
+        TradeStatus.TextColor3 =
+            C.YELLOW
+
+    elseif
+        profit
+        >= Settings.minProfitPercent
+    then
+
+        TradeStatus.Text =
+            string.format(
+                "WIN +%.2f%%",
+                profit
+            )
+
+        TradeStatus.TextColor3 =
+            C.GREEN
+
+    else
+
+        TradeStatus.Text =
+            string.format(
+                "LOSE %.2f%%",
+                profit
+            )
+
+        TradeStatus.TextColor3 =
+            C.RED
+    end
+end
+
+
+--============================================================
+-- REMOTE STATUS LOG
+--============================================================
+
+testLog(
+    "REQUEST",
+    TradeRemote.SendRequest
+        and "OK"
+        or "MISS",
+    TradeRemote.SendRequestName
+        or ""
+)
+
+
+testLog(
+    "ADD",
+    TradeRemote.Add
+        and "OK"
+        or "MISS",
+    TradeRemote.AddName
+        or ""
+)
+
+
+testLog(
+    "REMOVE",
+    TradeRemote.Remove
+        and "OK"
+        or "MISS",
+    TradeRemote.RemoveName
+        or ""
+)
+
+
+testLog(
+    "ACCEPT",
+    TradeRemote.Accept
+        and "OK"
+        or "MISS"
+)
+
+
+testLog(
+    "UNACCEPT",
+    TradeRemote.Unaccept
+        and "OK"
+        or "MISS"
+)
+
+
+testLog(
+    "CONFIRM",
+    TradeRemote.Confirm
+        and "OK"
+        or "MISS"
+)
+
+
+testLog(
+    "DECLINE",
+    TradeRemote.Decline
+        and "OK"
+        or "MISS"
+)
+
+
+testLog(
+    "SUGGEST ITEM",
+    TradeRemote.SuggestItem
+        and "FOUND / NOT USED YET"
+        or "MISS"
+)
+
+
+--============================================================
+-- CLOSE / OPEN
+--============================================================
+
+local OpenButton =
+    button(
+        Gui,
+        "AM",
+
+        UDim2.fromOffset(
+            48,
+            48
+        ),
+
+        UDim2.fromOffset(
+            12,
+            12
+        )
+    )
+
+
+OpenButton.Visible =
+    false
+
+OpenButton.BackgroundColor3 =
+    C.ACCENT
+
+
+CloseButton.Activated:
+Connect(
+    function()
+
+        Main.Visible =
+            false
+
+        OpenButton.Visible =
+            true
+    end
+)
+
+
+OpenButton.Activated:
+Connect(
+    function()
+
+        Main.Visible =
+            true
+
+        OpenButton.Visible =
+            false
+    end
+)
+
+
+--============================================================
+-- AMVGG INITIAL LOAD
+--============================================================
+
+setBoot(
+    "4/9",
+    "AMVGG LOAD"
+)
+
+
+task.spawn(
+    function()
+
+        local ok,
+            err =
+            pcall(
+                function()
+
+                    refresh()
+
+                    updateFirstSeen()
+
+                    updateStatusPage()
+
+                    rebuildSearch()
+                end
+            )
+
+        if not ok then
+
+            AMVGG.error =
+                tostring(
+                    err
+                )
+
+            warn(
+                "[AMVGG ERROR]",
+                err
+            )
+        end
+    end
+)
+
+
+--============================================================
+-- TRADE DISPLAY LOOP
+--============================================================
+
+setBoot(
+    "5/9",
+    "TRADE LOOP"
+)
+
 
 task.spawn(
     function()
 
         while Gui.Parent do
 
-            local ok, err =
+            local ok,
+                err =
+                pcall(
+                    updateTradeDisplay
+                )
+
+            if not ok then
+
+                warn(
+                    "[TRADE DISPLAY ERROR]",
+                    err
+                )
+            end
+
+            task.wait(
+                0.6
+            )
+        end
+    end
+)
+
+
+--============================================================
+-- TEST / AUTO LOOP
+--============================================================
+
+setBoot(
+    "6/9",
+    "AUTO LOOP"
+)
+
+
+task.spawn(
+    function()
+
+        while Gui.Parent do
+
+            local ok,
+                err =
                 pcall(
                     function()
 
-                        if TestSettings.testAutoAccept then
+                        if
+                            Settings.testAutoAccept
+                        then
 
-                            runTestMode()
+                            runTestAutoAccept()
 
-                        elseif TestSettings.autoTrade then
+                        elseif
+                            Settings.autoTrade
+                        then
 
                             runAutoTrade()
 
@@ -3705,17 +8218,6 @@ task.spawn(
                                 "OFF",
                                 C.MUTED
                             )
-
-                            TestHandledTrade =
-                                nil
-
-                            State.target =
-                                nil
-
-                            State.requestStarted =
-                                nil
-
-                            resetTradeState()
                         end
                     end
                 )
@@ -3723,7 +8225,7 @@ task.spawn(
             if not ok then
 
                 testLog(
-                    "LOOP ERROR:",
+                    "AUTO ERROR",
                     err
                 )
 
@@ -3734,50 +8236,46 @@ task.spawn(
             end
 
             task.wait(
-                0.45
+                0.42
             )
         end
     end
 )
 
+
 --============================================================
--- AMVGG FIRST-SEEN WATCHER
+-- LOG LOOP
 --============================================================
+
+setBoot(
+    "7/9",
+    "LOG LOOP"
+)
+
 
 task.spawn(
     function()
 
-        local lastVersion =
-            -1
-
         while Gui.Parent do
 
-            if
-                AMVGG.ready
-                and AMVGG.version
-                    ~= lastVersion
-            then
-
-                lastVersion =
-                    AMVGG.version
-
-                updateFirstSeen()
-
-                testLog(
-                    "AMVGG VERSION:",
-                    AMVGG.version
+            LogBox.Text =
+                table.concat(
+                    TestLogs,
+                    "\n"
                 )
-            end
+
+            updateStatusPage()
 
             task.wait(
-                1.5
+                0.8
             )
         end
     end
 )
 
+
 --============================================================
--- FASTER AMVGG REFRESH
+-- PERIODIC AMVGG REFRESH
 --============================================================
 
 task.spawn(
@@ -3789,98 +8287,118 @@ task.spawn(
                 math.max(
                     1,
                     tonumber(
-                        TestSettings.refreshMinutes
+                        Settings.refreshMinutes
                     )
                     or 5
                 )
 
             task.wait(
-                minutes * 60
+                minutes
+                * 60
             )
 
-            if Gui.Parent then
+            if not Gui.Parent then
+                break
+            end
 
-                testLog(
-                    "PERIODIC AMVGG REFRESH"
+            local ok,
+                err =
+                pcall(
+                    function()
+
+                        testLog(
+                            "AMVGG REFRESH"
+                        )
+
+                        refresh()
+
+                        updateFirstSeen()
+
+                        rebuildSearch()
+                    end
                 )
 
-                pcall(
-                    refresh
+            if not ok then
+
+                testLog(
+                    "REFRESH ERROR",
+                    err
                 )
             end
         end
     end
 )
 
+
 --============================================================
--- DEBUG REMOTE STATUS
+-- PLAYER CLEANUP
 --============================================================
 
-testLog(
-    "TEST/AUTO V11.7.0 READY"
+Players.PlayerRemoving:
+Connect(
+    function(player)
+
+        PlayerCooldowns[
+            player.UserId
+        ] =
+            nil
+
+        if
+            State.target
+            == player
+        then
+
+            State.target =
+                nil
+
+            State.requestStarted =
+                nil
+        end
+    end
 )
 
-testLog(
-    "SendTradeRequest =",
-    TradeRemote.SendRequest
-        and "OK"
-        or "MISSING"
+
+--============================================================
+-- READY
+--============================================================
+
+setBoot(
+    "8/9",
+    "FINALIZING"
 )
 
-testLog(
-    "AddItemToOffer =",
-    TradeRemote.Add
-        and "OK"
-        or "MISSING"
+
+setPage(
+    "TRADE"
 )
 
-testLog(
-    "RemoveItemFromOffer =",
-    TradeRemote.Remove
-        and "OK"
-        or "MISSING"
+
+saveSettings()
+
+
+setBoot(
+    "9/9",
+    "READY"
 )
 
-testLog(
-    "AcceptNegotiation =",
-    TradeRemote.Accept
-        and "OK"
-        or "MISSING"
-)
-
-testLog(
-    "ConfirmTrade =",
-    TradeRemote.Confirm
-        and "OK"
-        or "MISSING"
-)
-
-testLog(
-    "DeclineTrade =",
-    TradeRemote.Decline
-        and "OK"
-        or "MISSING"
-)
-
-testLog(
-    "SuggestItem =",
-    TradeRemote.SuggestItem
-        and "FOUND / NOT USED YET"
-        or "MISSING"
-)
-
-testLog(
-    "DEFAULT PROFIT =",
-    TestSettings.minProfitPercent,
-    "%"
-)
-
-testLog(
-    "NEW ITEM RULE = IGNORE VALUE FOR",
-    TestSettings.newItemHours,
-    "HOURS"
-)
 
 print(
-    "[AM TEST V11.7.0] READY"
+    "[AM V"
+    .. VERSION
+    .. "] READY"
+)
+
+
+task.delay(
+    2.5,
+    function()
+
+        if
+            BootGui
+            and BootGui.Parent
+        then
+
+            BootGui:Destroy()
+        end
+    end
 )
