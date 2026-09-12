@@ -1,7 +1,7 @@
 repeat task.wait() until game:IsLoaded()
 
 --============================================================
--- ADOPT ME TRADE ANALYZER V11.7.4
+-- ADOPT ME TRADE ANALYZER V11.7.5
 -- FULL MONOLITHIC BUILD
 --
 -- PAGES:
@@ -70,17 +70,21 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.4"
+    "11.7.5"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1174"
+    "AdoptMeTradeAnalyzerV1175"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1174"
+    "AM_ANALYZER_BOOT_V1175"
 
 
 print(
     "[AM V" .. VERSION .. "] BOOT"
+)
+
+print(
+    "[AM V" .. VERSION .. "] AUTO TRADE STRICT EXACT VARIANTS"
 )
 
 
@@ -127,7 +131,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1171",
     "AdoptMeTradeAnalyzerV1172",
     "AdoptMeTradeAnalyzerV1173",
-    "AdoptMeTradeAnalyzerV1174",
+    "AdoptMeTradeAnalyzerV1175",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -137,7 +141,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1171",
     "AM_ANALYZER_BOOT_V1172",
     "AM_ANALYZER_BOOT_V1173",
-    "AM_ANALYZER_BOOT_V1174",
+    "AM_ANALYZER_BOOT_V1175",
 }
 
 
@@ -4142,6 +4146,13 @@ local function valuedInventory()
                 or not Settings.blockEstimated
             )
             and data.value > 0
+            -- AUTO TRADE must never build an offer from guessed pet values.
+            -- Estimated values may still be displayed outside AUTO TRADE,
+            -- but the optimizer only receives exact AMVGG variants.
+            and not (
+                Settings.autoTrade
+                and data.estimated
+            )
             and isAllowed(
                 data.name
             )
@@ -6121,6 +6132,10 @@ Connect(
 
         if Settings.autoTrade then
             Settings.testAutoAccept = false
+
+            -- Real AUTO TRADE is always strict. The old estimated-value
+            -- multipliers are useful only for rough display/testing.
+            Settings.blockEstimated = true
         end
 
         saveSettings()
@@ -6681,6 +6696,73 @@ local function testLog(...)
     )
 end
 
+--============================================================
+-- ESTIMATED PET DEBUG
+--============================================================
+
+local function dumpEstimatedEntry(prefix, row)
+
+    if
+        type(row) ~= "table"
+        or type(row.data) ~= "table"
+        or row.data.estimated ~= true
+    then
+        return
+    end
+
+    local raw = row.raw
+    local entry, source = findAMVGG(raw)
+
+    testLog(
+        prefix,
+        row.data.name,
+        getVariant(raw),
+        "ESTIMATED • SOURCE=",
+        tostring(source or "?")
+    )
+
+    if type(entry) ~= "table" then
+        testLog("  RAW ENTRY MISSING")
+        return
+    end
+
+    local fields = {}
+
+    for key, value in pairs(entry) do
+        local numberValue = tonumber(value)
+
+        if numberValue ~= nil then
+            fields[#fields + 1] =
+                tostring(key)
+                .. "="
+                .. valueText(numberValue)
+        end
+    end
+
+    table.sort(fields)
+
+    if #fields == 0 then
+        testLog("  RAW NUMERIC FIELDS: none")
+        return
+    end
+
+    -- Split the raw AMVGG fields so the phone log stays readable.
+    local batch = {}
+
+    for index, text in ipairs(fields) do
+        batch[#batch + 1] = text
+
+        if #batch >= 4 or index == #fields then
+            testLog(
+                "  RAW",
+                table.concat(batch, " | ")
+            )
+            batch = {}
+        end
+    end
+end
+
+
 
 local LogBox =
     textBox(
@@ -7176,6 +7258,27 @@ local function evaluateTrade(
 
         result.reason =
             "UNKNOWN"
+
+        return result
+    end
+
+    -- CRITICAL AUTO-TRADE SAFETY:
+    -- Never make a real trade decision from fallback multipliers such as
+    -- regularValue*0.70 or megaValue*0.88. Those are not AMVGG's exact
+    -- potion/variant values and can be very far from the calculator.
+    if
+        Settings.autoTrade
+        and (
+            mine.estimated > 0
+            or theirs.estimated > 0
+        )
+    then
+
+        result.blocked =
+            true
+
+        result.reason =
+            "ESTIMATED VARIANT • EXACT VALUE REQUIRED"
 
         return result
     end
@@ -7832,6 +7935,22 @@ local function manageAutoTrade(trade)
             ),
             C.RED
         )
+
+        -- If AMVGG exact potion/variant fields were not found, show every
+        -- numeric field we actually received. This lets us map the real
+        -- calculator field instead of inventing another percentage.
+        if
+            evaluation.mine.estimated > 0
+            or evaluation.theirs.estimated > 0
+        then
+            for _, row in ipairs(evaluation.mine.items) do
+                dumpEstimatedEntry("OUR EST", row)
+            end
+
+            for _, row in ipairs(evaluation.theirs.items) do
+                dumpEstimatedEntry("THEIR EST", row)
+            end
+        end
 
         return
     end
