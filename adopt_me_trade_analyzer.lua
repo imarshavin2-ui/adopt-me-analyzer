@@ -1,41 +1,5 @@
 repeat task.wait() until game:IsLoaded()
 
---============================================================
--- ADOPT ME TRADE ANALYZER V11.7.0
--- FULL MONOLITHIC BUILD
---
--- PAGES:
---   TRADE
---   VALUES
---   UPDATES
---   SETTINGS
---   TEST
---
--- TEST:
---   TEST AUTO ACCEPT
---   AUTO TRADE
---
--- AUTO TRADE:
---   random player
---   trade request
---   highest safe item as showcase
---   wait for their items
---   calculate AMVGG
---   NEW <24H = 0
---   UNKNOWN = BLOCK
---   >= +10% = ACCEPT
---   otherwise optimize our side
---   ask add
---   wait 40 sec
---   decline if still bad
---   recheck after ACCEPT
---   recheck before CONFIRM
---============================================================
-
-
---============================================================
--- SERVICES
---============================================================
 
 local Players =
     game:GetService("Players")
@@ -69,13 +33,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.1"
+    "11.7.2"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1171"
+    "AdoptMeTradeAnalyzerV1172"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1171"
+    "AM_ANALYZER_BOOT_V1172"
 
 
 print(
@@ -124,6 +88,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1162",
     "AdoptMeTradeAnalyzerV1170",
     "AdoptMeTradeAnalyzerV1171",
+    "AdoptMeTradeAnalyzerV1172",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -131,6 +96,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1162",
     "AM_ANALYZER_BOOT_V1170",
     "AM_ANALYZER_BOOT_V1171",
+    "AM_ANALYZER_BOOT_V1172",
 }
 
 
@@ -5065,7 +5031,7 @@ local function nav(
                 1,
                 -20,
                 0,
-                42
+                30
             ),
 
             UDim2.fromOffset(
@@ -5100,27 +5066,28 @@ end
 
 nav(
     "TRADE",
-    46
+    42
 )
 
 nav(
     "VALUES",
-    96
+    76
 )
 
 nav(
     "UPDATES",
-    146
+    110
 )
 
 nav(
     "SETTINGS",
-    196
+    144
 )
 
+-- Separate TEST tab: intentionally placed high so it remains visible on mobile.
 nav(
     "TEST",
-    246
+    178
 )
 
 
@@ -5856,7 +5823,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        940
+        1120
     )
 
 TestCanvas.BackgroundTransparency =
@@ -5981,6 +5948,88 @@ Connect(
 renderModes()
 
 
+-- Keep Auto Trade-related safety/source settings on the TEST page too,
+-- so the whole test/auto-trade setup is available from one tab.
+label(
+    TestCanvas,
+    "AUTO TRADE / TEST SETTINGS",
+
+    UDim2.new(
+        1,
+        -24,
+        0,
+        24
+    ),
+
+    UDim2.fromOffset(
+        12,
+        98
+    ),
+
+    Enum.Font.GothamBold,
+    10,
+    C.ACCENT
+)
+
+
+local TestEstimatedToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.new(
+            1,
+            -24,
+            0,
+            34
+        ),
+
+        UDim2.fromOffset(
+            10,
+            126
+        )
+    )
+
+
+local function renderTestEstimated()
+
+    TestEstimatedToggle.Text =
+        "BLOCK ESTIMATED VALUES: "
+        .. (
+            Settings.blockEstimated
+            and "ON"
+            or "OFF"
+        )
+
+    TestEstimatedToggle.BackgroundColor3 =
+        Settings.blockEstimated
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+end
+
+
+TestEstimatedToggle.Activated:
+Connect(
+    function()
+
+        Settings.blockEstimated =
+            not Settings.blockEstimated
+
+        saveSettings()
+
+        renderEstimated()
+        renderTestEstimated()
+    end
+)
+
+
+renderTestEstimated()
+
+
 local function settingInput(
     title,
     value,
@@ -6029,7 +6078,7 @@ local ProfitInput =
     settingInput(
         "MIN PROFIT %",
         Settings.minProfitPercent,
-        108
+        178
     )
 
 
@@ -6037,7 +6086,7 @@ local AddTimeoutInput =
     settingInput(
         "ADD TIMEOUT",
         Settings.addTimeout,
-        146
+        216
     )
 
 
@@ -6045,7 +6094,7 @@ local FirstTimeoutInput =
     settingInput(
         "FIRST ITEM TIMEOUT",
         Settings.firstItemTimeout,
-        184
+        254
     )
 
 
@@ -6053,7 +6102,7 @@ local RequestTimeoutInput =
     settingInput(
         "REQUEST TIMEOUT",
         Settings.requestTimeout,
-        222
+        292
     )
 
 
@@ -6061,7 +6110,7 @@ local CooldownInput =
     settingInput(
         "PLAYER COOLDOWN",
         Settings.playerCooldown,
-        260
+        330
     )
 
 
@@ -6069,7 +6118,7 @@ local NewHoursInput =
     settingInput(
         "NEW ITEM HOURS",
         Settings.newItemHours,
-        298
+        368
     )
 
 
@@ -6176,7 +6225,7 @@ label(
 
     UDim2.fromOffset(
         12,
-        343
+        413
     ),
 
     Enum.Font.GothamBold,
@@ -6202,7 +6251,7 @@ local AllowedInput =
 
         UDim2.fromOffset(
             12,
-            369
+            439
         )
     )
 
@@ -6240,7 +6289,7 @@ local ChatToggle =
 
         UDim2.fromOffset(
             10,
-            441
+            511
         )
     )
 
@@ -6259,7 +6308,7 @@ local ScanInventory =
 
         UDim2.fromOffset(
             10,
-            485
+            555
         )
     )
 
@@ -6359,7 +6408,7 @@ local LogBox =
 
         UDim2.fromOffset(
             12,
-            535
+            607
         )
     )
 
@@ -7040,6 +7089,12 @@ local function showcase(myOffer)
 
     return false
 end
+
+
+testLog(
+    "TEST TAB READY",
+    "AUTO TRADE CONTROLS LOADED"
+)
 
 
 --============================================================
