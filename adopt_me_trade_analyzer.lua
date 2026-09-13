@@ -2,6 +2,7 @@ repeat task.wait() until game:IsLoaded()
 
 
 
+
 --============================================================
 -- SERVICES
 --============================================================
@@ -44,13 +45,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.14"
+    "11.7.15"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11714"
+    "AdoptMeTradeAnalyzerV11715"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11714"
+    "AM_ANALYZER_BOOT_V11715"
 
 
 print(
@@ -58,7 +59,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] SAFE HOP + EDITABLE HOP MINUTES + TRADE-END GUARD"
+    "[AM V" .. VERSION .. "] SETTINGS-ONLY AUTO TRADE + SAFE HOP + TRADE-END GUARD"
 )
 
 
@@ -114,6 +115,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV11711",
     "AdoptMeTradeAnalyzerV11712",
     "AdoptMeTradeAnalyzerV11713",
+    "AdoptMeTradeAnalyzerV11714",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -132,6 +134,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V11711",
     "AM_ANALYZER_BOOT_V11712",
     "AM_ANALYZER_BOOT_V11713",
+    "AM_ANALYZER_BOOT_V11714",
 }
 
 
@@ -226,7 +229,7 @@ local C = {
         Color3.fromRGB(
             76,
             215,
-            126
+            82
         ),
 
     RED =
@@ -2734,9 +2737,6 @@ local FIRST_SEEN_FILE =
 
 local Settings = {
 
-    testAutoAccept =
-        false,
-
     autoTrade =
         false,
 
@@ -3017,11 +3017,6 @@ else
         Settings.plazaAutoRoute == true
 end
 
--- Maximum one automation mode at a time. If an old save somehow has both ON,
--- real AUTO TRADE wins and TEST AUTO TRADE is switched off.
-if Settings.autoTrade and Settings.testAutoAccept then
-    Settings.testAutoAccept = false
-end
 
 local function activeMinItemValue(side)
 
@@ -5695,13 +5690,6 @@ nav(
     144
 )
 
--- Separate TEST tab: intentionally placed high so it remains visible on mobile.
-nav(
-    "TEST",
-    178
-)
-
-
 --============================================================
 -- TRADE PAGE
 --============================================================
@@ -6234,136 +6222,14 @@ label(
 )
 
 
-local RefreshSetting =
-    textBox(
-        SettingsPage,
-        Settings.refreshMinutes,
-        "5",
-
-        UDim2.fromOffset(
-            100,
-            32
-        ),
-
-        UDim2.fromOffset(
-            220,
-            60
-        )
-    )
+--============================================================
+-- AUTO TRADE CONTROLS (ALL INSIDE SETTINGS)
+--============================================================
 
 
 label(
     SettingsPage,
-    "AMVGG REFRESH MINUTES",
-
-    UDim2.fromOffset(
-        195,
-        32
-    ),
-
-    UDim2.fromOffset(
-        16,
-        60
-    ),
-
-    Enum.Font.GothamBold,
-    10,
-    C.MUTED
-)
-
-
-local EstimatedToggle =
-    button(
-        SettingsPage,
-        "",
-
-        UDim2.fromOffset(
-            260,
-            36
-        ),
-
-        UDim2.fromOffset(
-            16,
-            110
-        )
-    )
-
-
-local function renderEstimated()
-
-    EstimatedToggle.Text =
-        "BLOCK ESTIMATED VALUES: "
-        .. (
-            Settings.blockEstimated
-            and "ON"
-            or "OFF"
-        )
-
-    EstimatedToggle.BackgroundColor3 =
-        Settings.blockEstimated
-        and Color3.fromRGB(
-            40,
-            105,
-            70
-        )
-        or C.PANEL2
-end
-
-
-EstimatedToggle.Activated:
-Connect(
-    function()
-
-        Settings.blockEstimated =
-            not Settings.blockEstimated
-
-        saveSettings()
-
-        renderEstimated()
-    end
-)
-
-
-RefreshSetting.FocusLost:
-Connect(
-    function()
-
-        local value =
-            tonumber(
-                RefreshSetting.Text
-            )
-
-        if value then
-
-            Settings.refreshMinutes =
-                math.clamp(
-                    value,
-                    1,
-                    120
-                )
-
-            saveSettings()
-        end
-    end
-)
-
-
-renderEstimated()
-
-
---============================================================
--- TEST PAGE
---============================================================
-
-local TestPage =
-    createPage(
-        "TEST"
-    )
-
-
-label(
-    TestPage,
-    "TEST / AUTO TRADE",
+    "AUTO TRADE",
 
     UDim2.new(
         1,
@@ -6374,18 +6240,18 @@ label(
 
     UDim2.fromOffset(
         16,
-        8
+        48
     ),
 
     Enum.Font.GothamBold,
-    19,
-    C.TEXT
+    16,
+    C.ACCENT
 )
 
 
 local TestStatus =
     label(
-        TestPage,
+        SettingsPage,
         "STATUS: OFF",
 
         UDim2.new(
@@ -6397,7 +6263,7 @@ local TestStatus =
 
         UDim2.fromOffset(
             16,
-            40
+            78
         ),
 
         Enum.Font.Code,
@@ -6408,18 +6274,18 @@ local TestStatus =
 
 local TestScroll =
     makeScroll(
-        TestPage,
+        SettingsPage,
 
         UDim2.new(
             1,
             -30,
             1,
-            -78
+            -120
         ),
 
         UDim2.fromOffset(
             15,
-            66
+            108
         )
     )
 
@@ -6434,7 +6300,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1660
+        1580
     )
 
 TestCanvas.BackgroundTransparency =
@@ -6444,7 +6310,7 @@ TestCanvas.Parent =
     TestScroll
 
 
-local TestToggle =
+local AutoToggle =
     button(
         TestCanvas,
         "",
@@ -6463,34 +6329,7 @@ local TestToggle =
     )
 
 
-local AutoToggle =
-    button(
-        TestCanvas,
-        "",
-
-        UDim2.new(
-            1,
-            -24,
-            0,
-            36
-        ),
-
-        UDim2.fromOffset(
-            10,
-            54
-        )
-    )
-
-
 local function renderModes()
-
-    TestToggle.Text =
-        "TEST AUTO TRADE: "
-        .. (
-            Settings.testAutoAccept
-            and "ON"
-            or "OFF"
-        )
 
     AutoToggle.Text =
         "AUTO TRADE: "
@@ -6499,15 +6338,6 @@ local function renderModes()
             and "ON"
             or "OFF"
         )
-
-    TestToggle.BackgroundColor3 =
-        Settings.testAutoAccept
-        and Color3.fromRGB(
-            40,
-            105,
-            70
-        )
-        or C.PANEL2
 
     AutoToggle.BackgroundColor3 =
         Settings.autoTrade
@@ -6520,25 +6350,6 @@ local function renderModes()
 end
 
 
-TestToggle.Activated:
-Connect(
-    function()
-
-        Settings.testAutoAccept =
-            not Settings.testAutoAccept
-
-        if Settings.testAutoAccept then
-            -- TEST AUTO TRADE and AUTO TRADE are mutually exclusive.
-            Settings.autoTrade = false
-        end
-
-        saveSettings()
-
-        renderModes()
-    end
-)
-
-
 AutoToggle.Activated:
 Connect(
     function()
@@ -6547,11 +6358,8 @@ Connect(
             not Settings.autoTrade
 
         if Settings.autoTrade then
-            -- AUTO TRADE and TEST AUTO TRADE are mutually exclusive.
-            Settings.testAutoAccept = false
-
             -- Real AUTO TRADE is always strict. The old estimated-value
-            -- multipliers are useful only for rough display/testing.
+            -- multipliers are useful only for rough display.
             Settings.blockEstimated = true
         end
 
@@ -6565,11 +6373,10 @@ Connect(
 renderModes()
 
 
--- Keep Auto Trade-related safety/source settings on the TEST page too,
--- so the whole test/auto-trade setup is available from one tab.
+-- All Auto Trade controls live inside SETTINGS.
 label(
     TestCanvas,
-    "AUTO TRADE / TEST AUTO TRADE SETTINGS",
+    "AUTO TRADE SETTINGS",
 
     UDim2.new(
         1,
@@ -6580,7 +6387,7 @@ label(
 
     UDim2.fromOffset(
         12,
-        98
+        54
     ),
 
     Enum.Font.GothamBold,
@@ -6603,7 +6410,7 @@ local TestEstimatedToggle =
 
         UDim2.fromOffset(
             10,
-            126
+            82
         )
     )
 
@@ -6638,7 +6445,6 @@ Connect(
 
         saveSettings()
 
-        renderEstimated()
         renderTestEstimated()
     end
 )
@@ -6661,7 +6467,7 @@ local AllowEstimatedOwnPetsToggle =
 
         UDim2.fromOffset(
             10,
-            166
+            108
         )
     )
 
@@ -6747,11 +6553,19 @@ local function settingInput(
 end
 
 
+local RefreshMinutesInput =
+    settingInput(
+        "AMVGG REFRESH MINUTES",
+        Settings.refreshMinutes,
+        164
+    )
+
+
 local ProfitInput =
     settingInput(
         "MIN PROFIT %",
         Settings.minProfitPercent,
-        208
+        202
     )
 
 
@@ -6759,7 +6573,7 @@ local AddTimeoutInput =
     settingInput(
         "ADD TIMEOUT",
         Settings.addTimeout,
-        246
+        240
     )
 
 
@@ -6767,7 +6581,7 @@ local FirstTimeoutInput =
     settingInput(
         "FIRST ITEM TIMEOUT",
         Settings.firstItemTimeout,
-        284
+        278
     )
 
 
@@ -6775,7 +6589,7 @@ local RequestTimeoutInput =
     settingInput(
         "REQUEST TIMEOUT",
         Settings.requestTimeout,
-        322
+        316
     )
 
 
@@ -6783,7 +6597,7 @@ local CooldownInput =
     settingInput(
         "PLAYER COOLDOWN",
         Settings.playerCooldown,
-        360
+        354
     )
 
 
@@ -6791,7 +6605,7 @@ local NewHoursInput =
     settingInput(
         "NEW ITEM HOURS",
         Settings.newItemHours,
-        398
+        392
     )
 
 
@@ -6799,7 +6613,7 @@ local ItemActionDelayInput =
     settingInput(
         "ITEM ACTION DELAY",
         Settings.itemActionDelay,
-        436
+        430
     )
 
 
@@ -6807,7 +6621,7 @@ local ShowcaseDelayInput =
     settingInput(
         "SHOWCASE DELAY",
         Settings.showcaseDelay,
-        474
+        468
     )
 
 
@@ -6815,7 +6629,7 @@ local PreAcceptDelayInput =
     settingInput(
         "PRE ACCEPT DELAY",
         Settings.preAcceptDelay,
-        512
+        506
     )
 
 
@@ -6823,7 +6637,7 @@ local PostRebuildDelayInput =
     settingInput(
         "POST REBUILD WAIT",
         Settings.postRebuildDelay,
-        550
+        544
     )
 
 
@@ -6869,6 +6683,14 @@ local function bindNumber(
         end
     )
 end
+
+
+bindNumber(
+    RefreshMinutesInput,
+    "refreshMinutes",
+    1,
+    120
+)
 
 
 bindNumber(
@@ -6969,7 +6791,7 @@ local MinValueModeToggle =
 
         UDim2.fromOffset(
             10,
-            595
+            589
         )
     )
 
@@ -6978,7 +6800,7 @@ local MyMinValueInput =
     settingInput(
         "MY MIN ITEM VALUE",
         Settings.myMinItemValue,
-        639
+        633
     )
 
 
@@ -6986,7 +6808,7 @@ local TheirMinValueInput =
     settingInput(
         "THEIR MIN ITEM VALUE",
         Settings.theirMinItemValue,
-        677
+        671
     )
 
 
@@ -6994,7 +6816,7 @@ local AllMinValueInput =
     settingInput(
         "ALL MIN ITEM VALUE",
         Settings.allMinItemValue,
-        715
+        709
     )
 
 
@@ -7012,7 +6834,7 @@ local MinValueStatus =
 
         UDim2.fromOffset(
             12,
-            753
+            747
         ),
 
         Enum.Font.Code,
@@ -7142,7 +6964,7 @@ local AllowedInput =
 
         UDim2.fromOffset(
             12,
-            827
+            821
         )
     )
 
@@ -7180,7 +7002,7 @@ local ChatToggle =
 
         UDim2.fromOffset(
             10,
-            899
+            893
         )
     )
 
@@ -7199,7 +7021,7 @@ local ScanInventory =
 
         UDim2.fromOffset(
             10,
-            943
+            937
         )
     )
 
@@ -7366,7 +7188,7 @@ local LogBox =
 
         UDim2.fromOffset(
             12,
-            995
+            989
         )
     )
 
@@ -7395,14 +7217,14 @@ local SecondConfirmDelayInput =
     settingInput(
         "SECOND CONFIRM DELAY",
         Settings.secondConfirmDelay,
-        1310
+        1304
     )
 
 local PlazaHopMinutesInput =
     settingInput(
         "PLAZA HOP MINUTES (0=OFF)",
         Settings.plazaHopMinutes,
-        1348
+        1342
     )
 
 bindNumber(
@@ -7424,7 +7246,7 @@ do
         settingInput(
             "PARTNER REBUILD DELAY",
             Settings.partnerRebuildDelay,
-            1386
+            1380
         )
 
     bindNumber(
@@ -9586,11 +9408,11 @@ local function evaluateTrade(
         return result
     end
 
-    -- Our automated modes must never ACCEPT while our side contains a unit
+    -- AUTO TRADE must never ACCEPT while our side contains a unit
     -- below MY/ALL minimum. The optimizer/showcase already filters these out,
     -- so this mainly protects against a manual/stale item in the offer.
     if
-        (Settings.autoTrade or Settings.testAutoAccept)
+        Settings.autoTrade
         and mine.belowMin > 0
     then
 
@@ -9608,7 +9430,7 @@ local function evaluateTrade(
     -- regularValue*0.70 or megaValue*0.88. Those are not AMVGG's exact
     -- potion/variant values and can be very far from the calculator.
     if
-        (Settings.autoTrade or Settings.testAutoAccept)
+        Settings.autoTrade
         and (
             mine.estimated > 0
             or theirs.estimated > 0
@@ -10046,8 +9868,8 @@ end
 
 
 testLog(
-    "TEST TAB READY",
-    "AUTO TRADE + TEST AUTO TRADE • EXCLUSIVE MODES"
+    "SETTINGS AUTO TRADE READY",
+    "AUTO TRADE CONTROLS MOVED TO SETTINGS"
 )
 
 testLog(
@@ -10081,169 +9903,6 @@ testLog(
     Settings.plazaHopMinutes,
     "MIN"
 )
-
-
---============================================================
--- TEST AUTO TRADE
---============================================================
-
-local TestBadSignature =
-    nil
-
-local TestBadSince =
-    nil
-
-
-local function runTestAutoAccept()
-
-    local trade =
-        getTrade()
-
-    if not trade then
-
-        TestBadSignature =
-            nil
-
-        TestBadSince =
-            nil
-
-        -- Do not carry a FIRST-ACCEPT / SECOND-CONFIRM countdown into
-        -- a completely different manual test trade.
-        State.acceptedSignature =
-            nil
-
-        State.firstAcceptAt =
-            nil
-
-        State.firstAcceptSignature =
-            nil
-
-        State.confirmWaitLoggedSignature =
-            nil
-
-        setTestStatus(
-            "WAITING FOR TRADE",
-            C.MUTED
-        )
-
-        return
-    end
-
-    local myOffer,
-        theirOffer =
-        getTradeSides(
-            trade
-        )
-
-    if
-        not myOffer
-        or not theirOffer
-    then
-
-        return
-    end
-
-    local evaluation =
-        evaluateTrade(
-            myOffer,
-            theirOffer
-        )
-
-    if evaluation.blocked then
-
-        unaccept(
-            myOffer
-        )
-
-        setTestStatus(
-            "BLOCK "
-            .. tostring(
-                evaluation.reason
-            ),
-            C.RED
-        )
-
-        return
-    end
-
-    if evaluation.valid then
-
-        TestBadSignature =
-            nil
-
-        TestBadSince =
-            nil
-
-        setTestStatus(
-            string.format(
-                "WIN +%.2f%%",
-                evaluation.profit
-            ),
-            C.GREEN
-        )
-
-        secureAccept(
-            trade,
-            myOffer,
-            theirOffer
-        )
-
-        return
-    end
-
-    if
-        evaluation.mine.count == 0
-        or evaluation.theirs.count == 0
-    then
-
-        setTestStatus(
-            "WAITING ITEMS",
-            C.YELLOW
-        )
-
-        return
-    end
-
-    unaccept(
-        myOffer
-    )
-
-    local signature =
-        fullSignature(
-            myOffer,
-            theirOffer
-        )
-
-    if
-        TestBadSignature
-        ~= signature
-    then
-
-        TestBadSignature =
-            signature
-
-        TestBadSince =
-            os.clock()
-    end
-
-    setTestStatus(
-        "LOSE • DECLINE",
-        C.RED
-    )
-
-    if
-        TestBadSince
-        and os.clock()
-            - TestBadSince
-            >= 2.5
-    then
-
-        decline()
-
-        TestBadSince =
-            nil
-    end
-end
 
 
 --============================================================
@@ -11726,7 +11385,7 @@ task.spawn(
 
 
 --============================================================
--- TEST / AUTO LOOP
+-- AUTO TRADE LOOP
 --============================================================
 
 setBoot(
@@ -11756,12 +11415,6 @@ task.spawn(
                                 or "PLAZA ROUTER • DETECTING SERVER",
                                 C.YELLOW
                             )
-
-                        elseif
-                            Settings.testAutoAccept
-                        then
-
-                            runTestAutoAccept()
 
                         elseif
                             Settings.autoTrade
