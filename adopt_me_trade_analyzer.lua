@@ -44,13 +44,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.13"
+    "11.7.14"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11713"
+    "AdoptMeTradeAnalyzerV11714"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11713"
+    "AM_ANALYZER_BOOT_V11714"
 
 
 print(
@@ -58,7 +58,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] LOCAL-LIMIT FIX + 10S SECOND CONFIRM + ADOPT ME PLAZA ROUTER/HOP"
+    "[AM V" .. VERSION .. "] SAFE HOP + EDITABLE HOP MINUTES + TRADE-END GUARD"
 )
 
 
@@ -113,6 +113,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV11710",
     "AdoptMeTradeAnalyzerV11711",
     "AdoptMeTradeAnalyzerV11712",
+    "AdoptMeTradeAnalyzerV11713",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -130,6 +131,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V11710",
     "AM_ANALYZER_BOOT_V11711",
     "AM_ANALYZER_BOOT_V11712",
+    "AM_ANALYZER_BOOT_V11713",
 }
 
 
@@ -3006,7 +3008,7 @@ Settings.partnerRebuildDelay =
     math.max(0, tonumber(Settings.partnerRebuildDelay) or 10)
 
 Settings.plazaHopMinutes =
-    math.max(1, tonumber(Settings.plazaHopMinutes) or 20)
+    math.max(0, tonumber(Settings.plazaHopMinutes) or 20)
 
 if Settings.plazaAutoRoute == nil then
     Settings.plazaAutoRoute = true
@@ -7398,7 +7400,7 @@ local SecondConfirmDelayInput =
 
 local PlazaHopMinutesInput =
     settingInput(
-        "PLAZA HOP MINUTES",
+        "PLAZA HOP MINUTES (0=OFF)",
         Settings.plazaHopMinutes,
         1348
     )
@@ -7413,7 +7415,7 @@ bindNumber(
 bindNumber(
     PlazaHopMinutesInput,
     "plazaHopMinutes",
-    1,
+    0,
     180
 )
 
@@ -8765,7 +8767,7 @@ local function hopCurrentTradingPlaza()
     end
 
     plazaLog(
-        "20 MIN HOP ->",
+        "PLAZA HOP ->",
         target.JobId,
         target.Playing
         .. "/"
@@ -8875,8 +8877,9 @@ task.spawn(
 )
 
 
--- Once we are in Trading Plaza, wait 20 minutes. If a trade is active at the
--- deadline, do not kill it: hop immediately after that trade closes.
+-- Once we are in Trading Plaza, wait the editable hop interval (default 20m).
+-- 0 disables auto-hop. At the deadline NEVER teleport during a trade; wait until
+-- the trade is fully closed, then require 8 clean seconds before hopping.
 task.spawn(
     function()
 
@@ -8902,24 +8905,32 @@ task.spawn(
                 continue
             end
 
+            local hopMinutes =
+                math.max(
+                    0,
+                    tonumber(Settings.plazaHopMinutes) or 20
+                )
+
+            if hopMinutes <= 0 then
+                setTestStatus(
+                    "PLAZA AUTO HOP: OFF",
+                    C.MUTED
+                )
+
+                task.wait(5)
+                continue
+            end
+
             local seconds =
                 math.max(
                     60,
-                    (
-                        tonumber(
-                            Settings.plazaHopMinutes
-                        )
-                        or 20
-                    )
-                    * 60
+                    hopMinutes * 60
                 )
 
             plazaLog(
                 "HOP TIMER START",
-                valueText(
-                    seconds / 60
-                ),
-                "MIN"
+                valueText(hopMinutes),
+                "MIN • SAFE MODE: WAIT TRADE END"
             )
 
             local started =
@@ -8972,19 +8983,46 @@ task.spawn(
                 return
             end
 
-            while
-                Gui.Parent
-                and getTrade()
-            do
+            -- NEVER hop while a trade is active.
+            -- After the trade disappears, require 8 continuous seconds with no
+            -- trade data before teleporting. This protects the second-confirm /
+            -- closing transition where ClientData can briefly flicker.
+            local clearSince = nil
 
-                setTestStatus(
-                    "20 MIN HOP READY • WAITING TRADE END",
-                    C.YELLOW
-                )
+            while Gui.Parent do
+                if getTrade() then
+                    clearSince = nil
 
-                task.wait(
-                    2
-                )
+                    setTestStatus(
+                        "HOP READY • WAITING CURRENT TRADE TO FINISH",
+                        C.YELLOW
+                    )
+                else
+                    if not clearSince then
+                        clearSince = os.clock()
+
+                        plazaLog(
+                            "TRADE ENDED • SAFE HOP IN 8 SEC IF NO NEW TRADE"
+                        )
+                    end
+
+                    local clearFor = os.clock() - clearSince
+                    local remaining = math.max(0, 8 - clearFor)
+
+                    setTestStatus(
+                        string.format(
+                            "SAFE HOP • NO TRADE %.1fs / 8s",
+                            clearFor
+                        ),
+                        C.YELLOW
+                    )
+
+                    if clearFor >= 8 then
+                        break
+                    end
+                end
+
+                task.wait(1)
             end
 
             if not Gui.Parent then
