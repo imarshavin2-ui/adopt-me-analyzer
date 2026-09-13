@@ -1,6 +1,49 @@
 repeat task.wait() until game:IsLoaded()
 
 --============================================================
+-- ADOPT ME TRADE ANALYZER V11.7.11
+-- FULL MONOLITHIC BUILD
+--
+-- PAGES:
+--   TRADE
+--   VALUES
+--   UPDATES
+--   SETTINGS
+--   TEST
+--
+-- TEST:
+--   TEST AUTO TRADE
+--   AUTO TRADE
+--   only one automation mode can be ON
+--
+-- AUTO TRADE:
+--   random player
+--   trade request
+--   delayed highest safe item as showcase
+--   wait 50 sec for first partner item
+--   wait 70 sec after each later add request
+--   calculate AMVGG
+--   NEW <24H = 0
+--   UNKNOWN = BLOCK
+--   optimize our side to MIN PROFIT cap
+--   dynamic rebuild whenever partner changes offer
+--   interrupt stale rebuild if partner changes mid-build
+--   >= MIN PROFIT = FIRST ACCEPT
+--   wait 10 sec after FIRST ACCEPT before SECOND CONFIRM
+--   ask add
+--   wait 70 sec
+--   decline if still bad
+--   recheck after ACCEPT
+--   recheck during 10-sec second-confirm countdown
+--   recheck immediately before CONFIRM
+--   post-trade inventory rescan
+--   MY / THEIR / ALL minimum item-value filters
+--   if normal Adopt Me server -> route to Trading Plaza
+--   if already in Trading Plaza -> public server hop every 20 minutes
+--============================================================
+
+
+--============================================================
 -- SERVICES
 --============================================================
 
@@ -19,6 +62,12 @@ local UIS =
 local TextChatService =
     game:GetService("TextChatService")
 
+local TeleportService =
+    game:GetService("TeleportService")
+
+local MarketplaceService =
+    game:GetService("MarketplaceService")
+
 local LocalPlayer =
     Players.LocalPlayer
 
@@ -36,13 +85,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.10"
+    "11.7.11"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11710"
+    "AdoptMeTradeAnalyzerV11711"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11710"
+    "AM_ANALYZER_BOOT_V11711"
 
 
 print(
@@ -50,7 +99,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] WAIT WINDOWS + DYNAMIC REBUILD + MIN VALUE FILTERS + V11.6.2 VARIANT ENGINE"
+    "[AM V" .. VERSION .. "] 10S SECOND CONFIRM + ADOPT ME PLAZA ROUTER/HOP + WAIT WINDOWS + DYNAMIC REBUILD"
 )
 
 
@@ -103,6 +152,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1178",
     "AdoptMeTradeAnalyzerV1179",
     "AdoptMeTradeAnalyzerV11710",
+    "AdoptMeTradeAnalyzerV11711",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -118,6 +168,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1178",
     "AM_ANALYZER_BOOT_V1179",
     "AM_ANALYZER_BOOT_V11710",
+    "AM_ANALYZER_BOOT_V11711",
 }
 
 
@@ -2800,9 +2851,25 @@ local Settings = {
     postRebuildDelay =
         1.25,
 
-    -- Countdown after the final offer is stable before ACCEPT.
+    -- Countdown after the final offer is stable before FIRST ACCEPT.
     preAcceptDelay =
         4,
+
+    -- After FIRST ACCEPT, always wait this many seconds before SECOND CONFIRM.
+    -- Adopt Me's confirmation transition can take different amounts of time
+    -- depending on the amount of units in the trade, so never confirm instantly.
+    secondConfirmDelay =
+        10,
+
+    -- Server router / hopper.
+    -- If we are in a normal Adopt Me server, route to Trading Plaza.
+    -- If already in Trading Plaza, move to another public Plaza server
+    -- after this many minutes.
+    plazaAutoRoute =
+        true,
+
+    plazaHopMinutes =
+        20,
 
     -- Many low/mid pets on AMVGG do not expose an exact NP/R/F field and
     -- fall back to our variant estimate. Allow those estimates only for
@@ -2964,6 +3031,19 @@ Settings.showcaseDelay =
 
 Settings.maxTradeSeconds =
     math.max(180, tonumber(Settings.maxTradeSeconds) or 600)
+
+Settings.secondConfirmDelay =
+    math.max(0, tonumber(Settings.secondConfirmDelay) or 10)
+
+Settings.plazaHopMinutes =
+    math.max(1, tonumber(Settings.plazaHopMinutes) or 20)
+
+if Settings.plazaAutoRoute == nil then
+    Settings.plazaAutoRoute = true
+else
+    Settings.plazaAutoRoute =
+        Settings.plazaAutoRoute == true
+end
 
 -- Maximum one automation mode at a time. If an old save somehow has both ON,
 -- real AUTO TRADE wins and TEST AUTO TRADE is switched off.
@@ -7338,6 +7418,36 @@ LogBox.TextSize =
     9
 
 
+-- Safety/server timing controls added in V11.7.11.
+local SecondConfirmDelayInput =
+    settingInput(
+        "SECOND CONFIRM DELAY",
+        Settings.secondConfirmDelay,
+        1310
+    )
+
+local PlazaHopMinutesInput =
+    settingInput(
+        "PLAZA HOP MINUTES",
+        Settings.plazaHopMinutes,
+        1348
+    )
+
+bindNumber(
+    SecondConfirmDelayInput,
+    "secondConfirmDelay",
+    0,
+    60
+)
+
+bindNumber(
+    PlazaHopMinutesInput,
+    "plazaHopMinutes",
+    1,
+    180
+)
+
+
 local function setTestStatus(
     text,
     color
@@ -7354,6 +7464,1462 @@ local function setTestStatus(
         or C.MUTED
 end
 
+
+
+--============================================================
+-- ADOPT ME TRADING PLAZA ROUTER / SERVER HOP
+--
+-- Adapted from the user's multi-clone PS99 server-hop pattern:
+--   • discover Trading Plaza places inside the CURRENT Adopt Me universe
+--   • normal server -> route to Trading Plaza
+--   • Trading Plaza -> new public Plaza server every N minutes
+--   • shared Active / Visited file to reduce clone collisions
+--============================================================
+
+local PLAZA_HOP_SETTINGS = {
+
+    SharedFile =
+        "ADOPTME_8CLONES_TRADING_PLAZA.json",
+
+    RecentServerMemory =
+        3600,
+
+    ActiveServerTimeout =
+        180,
+
+    HeartbeatSeconds =
+        25,
+
+    RetrySeconds =
+        30,
+
+    MaxPages =
+        5,
+}
+
+
+local PlazaRouter = {
+
+    readyForTrading =
+        not Settings.plazaAutoRoute,
+
+    currentIsPlaza =
+        false,
+
+    currentPlazaPlaceId =
+        nil,
+
+    plazaPlaces =
+        {},
+
+    lastClassification =
+        0,
+
+    teleporting =
+        false,
+}
+
+
+local PLAZA_CLONE_ID =
+    tostring(
+        LocalPlayer.UserId
+    )
+    .. "_"
+    .. tostring(
+        math.random(
+            100000,
+            999999
+        )
+    )
+
+
+local function plazaLog(...)
+
+    local parts =
+        {}
+
+    for index,
+        value in ipairs(
+            {...}
+        )
+    do
+
+        parts[index] =
+            tostring(
+                value
+            )
+    end
+
+    local message =
+        table.concat(
+            parts,
+            " "
+        )
+
+    print(
+        "[PLAZA ROUTER]",
+        message
+    )
+
+    testLog(
+        "PLAZA",
+        message
+    )
+end
+
+
+local function newPlazaDatabase()
+
+    return {
+        Active = {},
+        Visited = {},
+    }
+end
+
+
+local function loadPlazaDatabase()
+
+    local data =
+        newPlazaDatabase()
+
+    if
+        type(isfile)
+            ~= "function"
+        or type(readfile)
+            ~= "function"
+    then
+
+        return data
+    end
+
+    local ok,
+        result =
+        pcall(
+            function()
+
+                if
+                    not isfile(
+                        PLAZA_HOP_SETTINGS.SharedFile
+                    )
+                then
+
+                    return nil
+                end
+
+                return
+                    HttpService:
+                    JSONDecode(
+                        readfile(
+                            PLAZA_HOP_SETTINGS.SharedFile
+                        )
+                    )
+            end
+        )
+
+    if
+        ok
+        and type(result)
+            == "table"
+    then
+
+        result.Active =
+            type(result.Active)
+                == "table"
+            and result.Active
+            or {}
+
+        result.Visited =
+            type(result.Visited)
+                == "table"
+            and result.Visited
+            or {}
+
+        return result
+    end
+
+    return data
+end
+
+
+local function savePlazaDatabase(data)
+
+    if type(writefile) ~= "function" then
+        return
+    end
+
+    pcall(
+        function()
+
+            writefile(
+                PLAZA_HOP_SETTINGS.SharedFile,
+
+                HttpService:
+                JSONEncode(
+                    data
+                )
+            )
+        end
+    )
+end
+
+
+local function cleanPlazaDatabase(data)
+
+    local now =
+        os.time()
+
+    for jobId,
+        info in pairs(
+            data.Active
+        )
+    do
+
+        local lastSeen =
+            0
+
+        if type(info) == "table" then
+
+            lastSeen =
+                tonumber(
+                    info.Time
+                )
+                or 0
+
+        elseif type(info) == "number" then
+
+            lastSeen =
+                info
+        end
+
+        if
+            now
+            - lastSeen
+            > PLAZA_HOP_SETTINGS.ActiveServerTimeout
+        then
+
+            data.Active[
+                jobId
+            ] =
+                nil
+        end
+    end
+
+    for jobId,
+        time in pairs(
+            data.Visited
+        )
+    do
+
+        time =
+            tonumber(
+                time
+            )
+            or 0
+
+        if
+            now
+            - time
+            > PLAZA_HOP_SETTINGS.RecentServerMemory
+        then
+
+            data.Visited[
+                jobId
+            ] =
+                nil
+        end
+    end
+end
+
+
+local function markCurrentPlazaServer()
+
+    if
+        not PlazaRouter.currentIsPlaza
+        or not game.JobId
+        or game.JobId == ""
+    then
+
+        return
+    end
+
+    local data =
+        loadPlazaDatabase()
+
+    cleanPlazaDatabase(
+        data
+    )
+
+    data.Active[
+        game.JobId
+    ] = {
+
+        Owner =
+            PLAZA_CLONE_ID,
+
+        UserId =
+            LocalPlayer.UserId,
+
+        PlaceId =
+            game.PlaceId,
+
+        Time =
+            os.time(),
+    }
+
+    data.Visited[
+        game.JobId
+    ] =
+        os.time()
+
+    savePlazaDatabase(
+        data
+    )
+end
+
+
+local function clearCurrentPlazaActive()
+
+    if
+        not game.JobId
+        or game.JobId == ""
+    then
+
+        return
+    end
+
+    local data =
+        loadPlazaDatabase()
+
+    cleanPlazaDatabase(
+        data
+    )
+
+    local info =
+        data.Active[
+            game.JobId
+        ]
+
+    if
+        type(info)
+            ~= "table"
+        or info.Owner
+            == PLAZA_CLONE_ID
+        or info.UserId
+            == LocalPlayer.UserId
+    then
+
+        data.Active[
+            game.JobId
+        ] =
+            nil
+    end
+
+    savePlazaDatabase(
+        data
+    )
+end
+
+
+local function plazaNameScore(name)
+
+    local lower =
+        tostring(
+            name
+            or ""
+        ):
+        lower()
+
+    if
+        lower:find(
+            "trading plaza",
+            1,
+            true
+        )
+    then
+
+        return 100
+    end
+
+    if
+        lower:find(
+            "trade plaza",
+            1,
+            true
+        )
+    then
+
+        return 95
+    end
+
+    if
+        lower:find(
+            "trading hub",
+            1,
+            true
+        )
+    then
+
+        return 90
+    end
+
+    if
+        lower:find(
+            "trade hub",
+            1,
+            true
+        )
+    then
+
+        return 85
+    end
+
+    if
+        lower:find(
+            "plaza",
+            1,
+            true
+        )
+        and (
+            lower:find(
+                "trad",
+                1,
+                true
+            )
+            ~= nil
+        )
+    then
+
+        return 80
+    end
+
+    -- Last-resort fallback for a universe whose place is simply called
+    -- "Trading". Lower priority than explicit Plaza / Hub names.
+    if
+        lower:find(
+            "trading",
+            1,
+            true
+        )
+    then
+
+        return 50
+    end
+
+    return 0
+end
+
+
+local function decodeHTTPJSON(url)
+
+    local ok,
+        body =
+        pcall(
+            function()
+
+                return
+                    game:HttpGet(
+                        url
+                    )
+            end
+        )
+
+    if
+        not ok
+        or type(body)
+            ~= "string"
+    then
+
+        return nil
+    end
+
+    local decoded
+
+    local decodeOK =
+        pcall(
+            function()
+
+                decoded =
+                    HttpService:
+                    JSONDecode(
+                        body
+                    )
+            end
+        )
+
+    if
+        not decodeOK
+        or type(decoded)
+            ~= "table"
+    then
+
+        return nil
+    end
+
+    return decoded
+end
+
+
+local function getUniversePlacesForPlaza()
+
+    local universeId =
+        tonumber(
+            game.GameId
+        )
+
+    if
+        not universeId
+        or universeId <= 0
+    then
+
+        return {}
+    end
+
+    local urls = {
+
+        "https://develop.roblox.com/v1/universes/"
+        .. tostring(
+            universeId
+        )
+        .. "/places?limit=100&sortOrder=Asc",
+
+        "https://apis.roblox.com/universes/v1/universes/"
+        .. tostring(
+            universeId
+        )
+        .. "/places?limit=100&sortOrder=Asc",
+    }
+
+    for _,
+        url in ipairs(
+            urls
+        )
+    do
+
+        local decoded =
+            decodeHTTPJSON(
+                url
+            )
+
+        if
+            type(decoded)
+                == "table"
+            and type(decoded.data)
+                == "table"
+            and #decoded.data > 0
+        then
+
+            return
+                decoded.data
+        end
+    end
+
+    return {}
+end
+
+
+local function getCurrentPlaceName()
+
+    local ok,
+        info =
+        pcall(
+            function()
+
+                return
+                    MarketplaceService:
+                    GetProductInfo(
+                        game.PlaceId
+                    )
+            end
+        )
+
+    if
+        ok
+        and type(info)
+            == "table"
+    then
+
+        return
+            tostring(
+                info.Name
+                or ""
+            )
+    end
+
+    return ""
+end
+
+
+local function discoverTradingPlazaPlaces()
+
+    local result =
+        {}
+
+    local seen =
+        {}
+
+    for _,
+        info in ipairs(
+            getUniversePlacesForPlaza()
+        )
+    do
+
+        local id =
+            tonumber(
+                info.id
+                or info.Id
+            )
+
+        local name =
+            tostring(
+                info.name
+                or info.Name
+                or ""
+            )
+
+        local score =
+            plazaNameScore(
+                name
+            )
+
+        if
+            id
+            and score > 0
+            and not seen[id]
+        then
+
+            seen[id] =
+                true
+
+            result[
+                #result + 1
+            ] = {
+
+                Id =
+                    id,
+
+                Name =
+                    name,
+
+                Score =
+                    score,
+            }
+        end
+    end
+
+    table.sort(
+        result,
+
+        function(a, b)
+
+            if a.Score == b.Score then
+
+                return
+                    a.Id
+                    < b.Id
+            end
+
+            return
+                a.Score
+                > b.Score
+        end
+    )
+
+    return result
+end
+
+
+local function shufflePlazaList(list)
+
+    for index =
+        #list,
+        2,
+        -1
+    do
+
+        local other =
+            math.random(
+                1,
+                index
+            )
+
+        list[index],
+        list[other] =
+            list[other],
+            list[index]
+    end
+end
+
+
+local function getPlazaServers(placeId)
+
+    local servers =
+        {}
+
+    local cursor =
+        nil
+
+    for _ =
+        1,
+        PLAZA_HOP_SETTINGS.MaxPages
+    do
+
+        local url =
+            "https://games.roblox.com/v1/games/"
+            .. tostring(
+                placeId
+            )
+            .. "/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100"
+
+        if
+            cursor
+            and cursor ~= ""
+        then
+
+            url =
+                url
+                .. "&cursor="
+                .. HttpService:
+                    UrlEncode(
+                        cursor
+                    )
+        end
+
+        local decoded =
+            decodeHTTPJSON(
+                url
+            )
+
+        if
+            type(decoded)
+                ~= "table"
+        then
+
+            break
+        end
+
+        if
+            type(decoded.data)
+                == "table"
+        then
+
+            for _,
+                server in ipairs(
+                    decoded.data
+                )
+            do
+
+                if server.id then
+
+                    servers[
+                        #servers + 1
+                    ] =
+                        server
+                end
+            end
+        end
+
+        cursor =
+            decoded.nextPageCursor
+
+        if
+            not cursor
+            or cursor == ""
+        then
+
+            break
+        end
+
+        task.wait()
+    end
+
+    return servers
+end
+
+
+local function plazaServerAllowed(
+    serverId,
+    database
+)
+
+    if
+        not serverId
+        or serverId == ""
+        or serverId == game.JobId
+    then
+
+        return false
+    end
+
+    if
+        database.Active[
+            serverId
+        ]
+        or database.Visited[
+            serverId
+        ]
+    then
+
+        return false
+    end
+
+    return true
+end
+
+
+local function reservePlazaServer(
+    placeId,
+    serverId
+)
+
+    local data =
+        loadPlazaDatabase()
+
+    cleanPlazaDatabase(
+        data
+    )
+
+    if
+        data.Active[
+            serverId
+        ]
+        or data.Visited[
+            serverId
+        ]
+    then
+
+        return false
+    end
+
+    data.Active[
+        serverId
+    ] = {
+
+        Owner =
+            PLAZA_CLONE_ID,
+
+        UserId =
+            LocalPlayer.UserId,
+
+        PlaceId =
+            placeId,
+
+        Time =
+            os.time(),
+    }
+
+    data.Visited[
+        serverId
+    ] =
+        os.time()
+
+    savePlazaDatabase(
+        data
+    )
+
+    return true
+end
+
+
+local function findNewPlazaServer(placeId)
+
+    local database =
+        loadPlazaDatabase()
+
+    cleanPlazaDatabase(
+        database
+    )
+
+    local servers =
+        getPlazaServers(
+            placeId
+        )
+
+    shufflePlazaList(
+        servers
+    )
+
+    if #servers > 1 then
+
+        local offset =
+            (
+                LocalPlayer.UserId
+                % #servers
+            )
+            + 1
+
+        local rotated =
+            {}
+
+        for index =
+            0,
+            #servers - 1
+        do
+
+            local sourceIndex =
+                (
+                    (
+                        offset
+                        + index
+                        - 1
+                    )
+                    % #servers
+                )
+                + 1
+
+            rotated[
+                #rotated + 1
+            ] =
+                servers[
+                    sourceIndex
+                ]
+        end
+
+        servers =
+            rotated
+    end
+
+    for _,
+        server in ipairs(
+            servers
+        )
+    do
+
+        local serverId =
+            tostring(
+                server.id
+                or ""
+            )
+
+        local playing =
+            tonumber(
+                server.playing
+            )
+            or 0
+
+        local maxPlayers =
+            tonumber(
+                server.maxPlayers
+            )
+            or 0
+
+        if
+            maxPlayers > 0
+            and playing < maxPlayers
+            and plazaServerAllowed(
+                serverId,
+                database
+            )
+            and reservePlazaServer(
+                placeId,
+                serverId
+            )
+        then
+
+            return {
+                PlaceId =
+                    placeId,
+
+                JobId =
+                    serverId,
+
+                Playing =
+                    playing,
+
+                MaxPlayers =
+                    maxPlayers,
+            }
+        end
+    end
+
+    return nil
+end
+
+
+local function teleportToPlazaTarget(
+    placeId,
+    serverId
+)
+
+    if PlazaRouter.teleporting then
+        return false
+    end
+
+    PlazaRouter.teleporting =
+        true
+
+    PlazaRouter.readyForTrading =
+        false
+
+    local ok,
+        err =
+        pcall(
+            function()
+
+                if
+                    serverId
+                    and serverId ~= ""
+                then
+
+                    TeleportService:
+                    TeleportToPlaceInstance(
+                        placeId,
+                        serverId,
+                        LocalPlayer
+                    )
+
+                else
+
+                    TeleportService:
+                    Teleport(
+                        placeId,
+                        LocalPlayer
+                    )
+                end
+            end
+        )
+
+    if not ok then
+
+        PlazaRouter.teleporting =
+            false
+
+        plazaLog(
+            "TELEPORT ERROR",
+            tostring(
+                err
+            )
+        )
+
+        return false
+    end
+
+    return true
+end
+
+
+local function routeNormalServerToPlaza()
+
+    local plazaPlaces =
+        discoverTradingPlazaPlaces()
+
+    PlazaRouter.plazaPlaces =
+        plazaPlaces
+
+    PlazaRouter.lastClassification =
+        os.clock()
+
+    local currentPlaceId =
+        tonumber(
+            game.PlaceId
+        )
+
+    for _,
+        place in ipairs(
+            plazaPlaces
+        )
+    do
+
+        if
+            tonumber(
+                place.Id
+            )
+            == currentPlaceId
+        then
+
+            PlazaRouter.currentIsPlaza =
+                true
+
+            PlazaRouter.currentPlazaPlaceId =
+                currentPlaceId
+
+            PlazaRouter.readyForTrading =
+                true
+
+            markCurrentPlazaServer()
+
+            plazaLog(
+                "TRADING PLAZA DETECTED",
+                place.Name,
+                "PLACE=",
+                currentPlaceId,
+                "HOP IN",
+                valueText(
+                    Settings.plazaHopMinutes
+                ),
+                "MIN"
+            )
+
+            return true
+        end
+    end
+
+    -- If the universe-place endpoint is temporarily unavailable, at least
+    -- detect that the CURRENT place itself is clearly a Trading Plaza.
+    if #plazaPlaces == 0 then
+
+        local currentName =
+            getCurrentPlaceName()
+
+        if
+            plazaNameScore(
+                currentName
+            )
+            > 0
+        then
+
+            PlazaRouter.currentIsPlaza =
+                true
+
+            PlazaRouter.currentPlazaPlaceId =
+                currentPlaceId
+
+            PlazaRouter.readyForTrading =
+                true
+
+            markCurrentPlazaServer()
+
+            plazaLog(
+                "TRADING PLAZA DETECTED BY CURRENT NAME",
+                currentName,
+                "PLACE=",
+                currentPlaceId
+            )
+
+            return true
+        end
+    end
+
+    PlazaRouter.currentIsPlaza =
+        false
+
+    PlazaRouter.currentPlazaPlaceId =
+        nil
+
+    PlazaRouter.readyForTrading =
+        false
+
+    if #plazaPlaces == 0 then
+
+        plazaLog(
+            "PLAZA PLACE NOT FOUND • RETRY IN",
+            PLAZA_HOP_SETTINGS.RetrySeconds,
+            "SEC"
+        )
+
+        return false
+    end
+
+    local targetPlace =
+        plazaPlaces[1]
+
+    plazaLog(
+        "NORMAL SERVER DETECTED -> TRADING PLAZA",
+        targetPlace.Name,
+        "PLACE=",
+        targetPlace.Id
+    )
+
+    setTestStatus(
+        "NORMAL SERVER • TELEPORTING TO TRADING PLAZA",
+        C.YELLOW
+    )
+
+    local targetServer =
+        findNewPlazaServer(
+            targetPlace.Id
+        )
+
+    if targetServer then
+
+        plazaLog(
+            "ROUTE SERVER",
+            targetServer.JobId,
+            targetServer.Playing
+            .. "/"
+            .. targetServer.MaxPlayers
+        )
+
+        return
+            teleportToPlazaTarget(
+                targetServer.PlaceId,
+                targetServer.JobId
+            )
+    end
+
+    -- Fallback if public-server enumeration fails. Roblox chooses a Plaza
+    -- server for us; the next autoexecute run re-detects and resumes hopping.
+    plazaLog(
+        "NO SPECIFIC PLAZA SERVER FOUND • RANDOM PLAZA TELEPORT"
+    )
+
+    return
+        teleportToPlazaTarget(
+            targetPlace.Id,
+            nil
+        )
+end
+
+
+local function hopCurrentTradingPlaza()
+
+    if
+        not PlazaRouter.currentIsPlaza
+    then
+
+        return false
+    end
+
+    local placeId =
+        tonumber(
+            PlazaRouter.currentPlazaPlaceId
+        )
+        or tonumber(
+            game.PlaceId
+        )
+
+    if not placeId then
+        return false
+    end
+
+    clearCurrentPlazaActive()
+
+    local target =
+        findNewPlazaServer(
+            placeId
+        )
+
+    if not target then
+
+        plazaLog(
+            "NEW PLAZA SERVER NOT FOUND • RETRY LATER"
+        )
+
+        markCurrentPlazaServer()
+
+        return false
+    end
+
+    plazaLog(
+        "20 MIN HOP ->",
+        target.JobId,
+        target.Playing
+        .. "/"
+        .. target.MaxPlayers
+    )
+
+    setTestStatus(
+        "PLAZA HOP • NEW SERVER",
+        C.YELLOW
+    )
+
+    return
+        teleportToPlazaTarget(
+            target.PlaceId,
+            target.JobId
+        )
+end
+
+
+-- Heartbeat for multi-clone collision avoidance.
+task.spawn(
+    function()
+
+        while
+            Gui.Parent
+            and Settings.plazaAutoRoute
+        do
+
+            if
+                PlazaRouter.currentIsPlaza
+            then
+
+                markCurrentPlazaServer()
+            end
+
+            task.wait(
+                PLAZA_HOP_SETTINGS.HeartbeatSeconds
+            )
+        end
+    end
+)
+
+
+-- Classification + normal-server routing.
+task.spawn(
+    function()
+
+        if
+            not Settings.plazaAutoRoute
+        then
+
+            PlazaRouter.readyForTrading =
+                true
+
+            return
+        end
+
+        while
+            Gui.Parent
+            and not PlazaRouter.currentIsPlaza
+            and not PlazaRouter.teleporting
+        do
+
+            local ok,
+                err =
+                pcall(
+                    routeNormalServerToPlaza
+                )
+
+            if not ok then
+
+                plazaLog(
+                    "ROUTER ERROR",
+                    tostring(
+                        err
+                    )
+                )
+            end
+
+            if
+                PlazaRouter.currentIsPlaza
+                or PlazaRouter.teleporting
+            then
+
+                break
+            end
+
+            task.wait(
+                PLAZA_HOP_SETTINGS.RetrySeconds
+            )
+        end
+    end
+)
+
+
+-- Once we are in Trading Plaza, wait 20 minutes. If a trade is active at the
+-- deadline, do not kill it: hop immediately after that trade closes.
+task.spawn(
+    function()
+
+        if
+            not Settings.plazaAutoRoute
+        then
+
+            return
+        end
+
+        while
+            Gui.Parent
+        do
+
+            if
+                not PlazaRouter.currentIsPlaza
+            then
+
+                task.wait(
+                    2
+                )
+
+                continue
+            end
+
+            local seconds =
+                math.max(
+                    60,
+                    (
+                        tonumber(
+                            Settings.plazaHopMinutes
+                        )
+                        or 20
+                    )
+                    * 60
+                )
+
+            plazaLog(
+                "HOP TIMER START",
+                valueText(
+                    seconds / 60
+                ),
+                "MIN"
+            )
+
+            local started =
+                os.clock()
+
+            while
+                Gui.Parent
+                and PlazaRouter.currentIsPlaza
+                and not PlazaRouter.teleporting
+                and os.clock()
+                    - started
+                    < seconds
+            do
+
+                task.wait(
+                    5
+                )
+            end
+
+            if
+                not Gui.Parent
+                or PlazaRouter.teleporting
+            then
+
+                return
+            end
+
+            while
+                Gui.Parent
+                and getTrade()
+            do
+
+                setTestStatus(
+                    "20 MIN HOP READY • WAITING TRADE END",
+                    C.YELLOW
+                )
+
+                task.wait(
+                    2
+                )
+            end
+
+            if not Gui.Parent then
+                return
+            end
+
+            local hopped =
+                false
+
+            local ok,
+                result =
+                pcall(
+                    hopCurrentTradingPlaza
+                )
+
+            if ok then
+                hopped = result == true
+            else
+
+                plazaLog(
+                    "HOP ERROR",
+                    tostring(
+                        result
+                    )
+                )
+            end
+
+            if hopped then
+                return
+            end
+
+            -- Failed to locate/teleport to a new server. Retry soon instead
+            -- of waiting another full 20 minutes.
+            task.wait(
+                PLAZA_HOP_SETTINGS.RetrySeconds
+            )
+        end
+    end
+)
 
 local function scanInventoryAndLog(reason)
 
@@ -7481,6 +9047,15 @@ local State = {
     acceptedSignature =
         nil,
 
+    firstAcceptAt =
+        nil,
+
+    firstAcceptSignature =
+        nil,
+
+    confirmWaitLoggedSignature =
+        nil,
+
     acceptReadySignature =
         nil,
 
@@ -7550,6 +9125,15 @@ local function resetState()
         nil
 
     State.acceptedSignature =
+        nil
+
+    State.firstAcceptAt =
+        nil
+
+    State.firstAcceptSignature =
+        nil
+
+    State.confirmWaitLoggedSignature =
         nil
 
     State.acceptReadySignature =
@@ -7744,6 +9328,20 @@ local function unaccept(myOffer)
             "UNACCEPT"
         )
     end
+
+    -- Any unaccept/cancel of our first-stage approval invalidates the
+    -- second-confirm timer. A new stable first ACCEPT must start a fresh wait.
+    State.acceptedSignature =
+        nil
+
+    State.firstAcceptAt =
+        nil
+
+    State.firstAcceptSignature =
+        nil
+
+    State.confirmWaitLoggedSignature =
+        nil
 end
 
 
@@ -7939,9 +9537,6 @@ local function secureAccept(
             myOffer
         )
 
-        State.acceptedSignature =
-            nil
-
         return false
     end
 
@@ -7977,6 +9572,8 @@ local function secureAccept(
 
     if confirmStage then
 
+        -- If anything changed after FIRST ACCEPT, never carry the old timer
+        -- into the new offer. The offer must go back through FIRST ACCEPT.
         if
             State.acceptedSignature
             and State.acceptedSignature
@@ -7984,15 +9581,128 @@ local function secureAccept(
         then
 
             testLog(
-                "CHANGED BEFORE CONFIRM"
+                "CHANGED BEFORE SECOND CONFIRM"
             )
 
             unaccept(
                 myOffer
             )
 
+            return false
+        end
+
+        -- Normally this timestamp is created exactly when we press FIRST
+        -- ACCEPT below. If the executor only notices the trade after it has
+        -- already entered confirmation, start a conservative fresh 10s timer
+        -- from the first moment we observe this exact confirmation offer.
+        if
+            State.firstAcceptSignature
+                ~= signature
+            or not State.firstAcceptAt
+        then
+
             State.acceptedSignature =
+                signature
+
+            State.firstAcceptSignature =
+                signature
+
+            State.firstAcceptAt =
+                os.clock()
+
+            State.confirmWaitLoggedSignature =
                 nil
+        end
+
+        -- Recalculate continuously during the confirmation countdown.
+        local liveCheck =
+            evaluateTrade(
+                myOffer,
+                theirOffer
+            )
+
+        if
+            liveCheck.blocked
+            or not liveCheck.valid
+        then
+
+            testLog(
+                "SECOND CONFIRM CHECK FAILED"
+            )
+
+            unaccept(
+                myOffer
+            )
+
+            return false
+        end
+
+        local requiredDelay =
+            math.max(
+                0,
+                tonumber(
+                    Settings.secondConfirmDelay
+                )
+                or 10
+            )
+
+        local elapsed =
+            os.clock()
+            - (
+                State.firstAcceptAt
+                or os.clock()
+            )
+
+        local remaining =
+            requiredDelay
+            - elapsed
+
+        if remaining > 0 then
+
+            if
+                State.confirmWaitLoggedSignature
+                ~= signature
+            then
+
+                State.confirmWaitLoggedSignature =
+                    signature
+
+                testLog(
+                    "FIRST ACCEPT DONE • WAIT SECOND CONFIRM",
+                    valueText(
+                        requiredDelay
+                    ),
+                    "SECONDS"
+                )
+            end
+
+            setTestStatus(
+                string.format(
+                    "1ST ACCEPTED • 2ND CONFIRM IN %.1fs",
+                    remaining
+                ),
+                C.YELLOW
+            )
+
+            return true
+        end
+
+        -- Final value/signature check at the exact moment of SECOND CONFIRM.
+        local finalSignature =
+            fullSignature(
+                myOffer,
+                theirOffer
+            )
+
+        if finalSignature ~= signature then
+
+            testLog(
+                "OFFER MOVED AT SECOND CONFIRM"
+            )
+
+            unaccept(
+                myOffer
+            )
 
             return false
         end
@@ -8016,9 +9726,6 @@ local function secureAccept(
                 myOffer
             )
 
-            State.acceptedSignature =
-                nil
-
             return false
         end
 
@@ -8030,7 +9737,11 @@ local function secureAccept(
         then
 
             testLog(
-                "CONFIRM +",
+                "SECOND CONFIRM AFTER",
+                valueText(
+                    requiredDelay
+                ),
+                "SEC +",
                 string.format(
                     "%.2f%%",
                     final.profit
@@ -8051,20 +9762,68 @@ local function secureAccept(
         )
     then
 
-        State.acceptedSignature =
-            signature
-
         testLog(
-            "ACCEPT +",
+            "FIRST ACCEPT +",
             string.format(
                 "%.2f%%",
                 evaluation.profit
             )
         )
 
-        remoteCall(
-            TradeRemote.Accept
-        )
+        local ok =
+            remoteCall(
+                TradeRemote.Accept
+            )
+
+        if ok then
+
+            State.acceptedSignature =
+                signature
+
+            State.firstAcceptSignature =
+                signature
+
+            -- IMPORTANT: the 10-second SECOND CONFIRM countdown starts
+            -- from the moment FIRST ACCEPT is actually sent.
+            State.firstAcceptAt =
+                os.clock()
+
+            State.confirmWaitLoggedSignature =
+                nil
+        else
+
+            State.acceptedSignature =
+                nil
+
+            State.firstAcceptSignature =
+                nil
+
+            State.firstAcceptAt =
+                nil
+
+            State.confirmWaitLoggedSignature =
+                nil
+        end
+
+    elseif
+        State.firstAcceptSignature
+            ~= signature
+        or not State.firstAcceptAt
+    then
+
+        -- State-sync fallback: we are accepted already but did not observe
+        -- the click that caused it. Be conservative and start a fresh timer.
+        State.acceptedSignature =
+            signature
+
+        State.firstAcceptSignature =
+            signature
+
+        State.firstAcceptAt =
+            os.clock()
+
+        State.confirmWaitLoggedSignature =
+            nil
     end
 
     return true
@@ -8151,6 +9910,22 @@ testLog(
     valueText(activeMinItemValue("theirs"))
 )
 
+testLog(
+    "SECOND CONFIRM DELAY =",
+    Settings.secondConfirmDelay,
+    "SEC"
+)
+
+testLog(
+    "PLAZA ROUTER =",
+    Settings.plazaAutoRoute
+    and "ON"
+    or "OFF",
+    "HOP EVERY",
+    Settings.plazaHopMinutes,
+    "MIN"
+)
+
 
 --============================================================
 -- TEST AUTO TRADE
@@ -8174,6 +9949,20 @@ local function runTestAutoAccept()
             nil
 
         TestBadSince =
+            nil
+
+        -- Do not carry a FIRST-ACCEPT / SECOND-CONFIRM countdown into
+        -- a completely different manual test trade.
+        State.acceptedSignature =
+            nil
+
+        State.firstAcceptAt =
+            nil
+
+        State.firstAcceptSignature =
+            nil
+
+        State.confirmWaitLoggedSignature =
             nil
 
         setTestStatus(
@@ -9760,6 +11549,18 @@ task.spawn(
                     function()
 
                         if
+                            Settings.plazaAutoRoute
+                            and not PlazaRouter.readyForTrading
+                        then
+
+                            setTestStatus(
+                                PlazaRouter.teleporting
+                                and "TELEPORTING TO TRADING PLAZA"
+                                or "PLAZA ROUTER • DETECTING SERVER",
+                                C.YELLOW
+                            )
+
+                        elseif
                             Settings.testAutoAccept
                         then
 
