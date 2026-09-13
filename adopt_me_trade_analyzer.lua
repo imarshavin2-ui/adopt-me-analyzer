@@ -1,46 +1,5 @@
 repeat task.wait() until game:IsLoaded()
 
---============================================================
--- ADOPT ME TRADE ANALYZER V11.7.11
--- FULL MONOLITHIC BUILD
---
--- PAGES:
---   TRADE
---   VALUES
---   UPDATES
---   SETTINGS
---   TEST
---
--- TEST:
---   TEST AUTO TRADE
---   AUTO TRADE
---   only one automation mode can be ON
---
--- AUTO TRADE:
---   random player
---   trade request
---   delayed highest safe item as showcase
---   wait 50 sec for first partner item
---   wait 70 sec after each later add request
---   calculate AMVGG
---   NEW <24H = 0
---   UNKNOWN = BLOCK
---   optimize our side to MIN PROFIT cap
---   dynamic rebuild whenever partner changes offer
---   interrupt stale rebuild if partner changes mid-build
---   >= MIN PROFIT = FIRST ACCEPT
---   wait 10 sec after FIRST ACCEPT before SECOND CONFIRM
---   ask add
---   wait 70 sec
---   decline if still bad
---   recheck after ACCEPT
---   recheck during 10-sec second-confirm countdown
---   recheck immediately before CONFIRM
---   post-trade inventory rescan
---   MY / THEIR / ALL minimum item-value filters
---   if normal Adopt Me server -> route to Trading Plaza
---   if already in Trading Plaza -> public server hop every 20 minutes
---============================================================
 
 
 --============================================================
@@ -85,13 +44,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.11"
+    "11.7.12"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11711"
+    "AdoptMeTradeAnalyzerV11712"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11711"
+    "AM_ANALYZER_BOOT_V11712"
 
 
 print(
@@ -99,7 +58,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] 10S SECOND CONFIRM + ADOPT ME PLAZA ROUTER/HOP + WAIT WINDOWS + DYNAMIC REBUILD"
+    "[AM V" .. VERSION .. "] LOCAL-LIMIT FIX + 10S SECOND CONFIRM + ADOPT ME PLAZA ROUTER/HOP"
 )
 
 
@@ -7474,7 +7433,12 @@ end
 --   • normal server -> route to Trading Plaza
 --   • Trading Plaza -> new public Plaza server every N minutes
 --   • shared Active / Visited file to reduce clone collisions
+--   • helper locals are isolated in a do-scope to avoid Luau local-limit compile failure
 --============================================================
+
+local PlazaRouter
+
+do
 
 local PLAZA_HOP_SETTINGS = {
 
@@ -7498,7 +7462,7 @@ local PLAZA_HOP_SETTINGS = {
 }
 
 
-local PlazaRouter = {
+PlazaRouter = {
 
     readyForTrading =
         not Settings.plazaAutoRoute,
@@ -8920,6 +8884,8 @@ task.spawn(
         end
     end
 )
+
+end -- PLAZA ROUTER LOCAL SCOPE (prevents Luau main-chunk local limit)
 
 local function scanInventoryAndLog(reason)
 
