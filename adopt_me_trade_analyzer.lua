@@ -44,13 +44,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.12"
+    "11.7.13"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11712"
+    "AdoptMeTradeAnalyzerV11713"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11712"
+    "AM_ANALYZER_BOOT_V11713"
 
 
 print(
@@ -112,6 +112,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1179",
     "AdoptMeTradeAnalyzerV11710",
     "AdoptMeTradeAnalyzerV11711",
+    "AdoptMeTradeAnalyzerV11712",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -128,6 +129,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1179",
     "AM_ANALYZER_BOOT_V11710",
     "AM_ANALYZER_BOOT_V11711",
+    "AM_ANALYZER_BOOT_V11712",
 }
 
 
@@ -2771,6 +2773,12 @@ local Settings = {
     settleSeconds =
         2,
 
+    -- Debounce THEIR side. Every partner add/remove resets this timer.
+    -- We do not rebuild our offer until their side has been unchanged
+    -- for the full delay, so 1-2 quick items do not trigger an instant rebuild.
+    partnerRebuildDelay =
+        10,
+
     -- Long enough that repeated 70-second add windows are not cut off early.
     maxTradeSeconds =
         600,
@@ -2993,6 +3001,9 @@ Settings.maxTradeSeconds =
 
 Settings.secondConfirmDelay =
     math.max(0, tonumber(Settings.secondConfirmDelay) or 10)
+
+Settings.partnerRebuildDelay =
+    math.max(0, tonumber(Settings.partnerRebuildDelay) or 10)
 
 Settings.plazaHopMinutes =
     math.max(1, tonumber(Settings.plazaHopMinutes) or 20)
@@ -6421,7 +6432,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1600
+        1660
     )
 
 TestCanvas.BackgroundTransparency =
@@ -7406,6 +7417,22 @@ bindNumber(
     180
 )
 
+do
+    local PartnerRebuildDelayInput =
+        settingInput(
+            "PARTNER REBUILD DELAY",
+            Settings.partnerRebuildDelay,
+            1386
+        )
+
+    bindNumber(
+        PartnerRebuildDelayInput,
+        "partnerRebuildDelay",
+        0,
+        60
+    )
+end
+
 
 local function setTestStatus(
     text,
@@ -7460,6 +7487,12 @@ local PLAZA_HOP_SETTINGS = {
     MaxPages =
         5,
 }
+
+-- Current Adopt Me Trading Hub place. Dynamic universe discovery is still
+-- used, but this hard fallback keeps the router alive when Roblox API HTTP
+-- is blocked by the executor.
+local KNOWN_TRADING_HUB_PLACE_ID =
+    132388544979740
 
 
 PlazaRouter = {
@@ -7875,24 +7908,60 @@ end
 
 local function decodeHTTPJSON(url)
 
-    local ok,
-        body =
-        pcall(
-            function()
+    local body =
+        nil
 
-                return
-                    game:HttpGet(
-                        url
-                    )
+    -- Delta/executors can block game:HttpGet for Roblox API domains while
+    -- request/http_request still works. Prefer the already detected REQUEST.
+    if type(REQUEST) == "function" then
+
+        local ok,
+            response =
+            pcall(
+                REQUEST,
+                {
+                    Url = url,
+                    URL = url,
+                    Method = "GET",
+                    Headers = {
+                        ["Accept"] = "application/json",
+                        ["Cache-Control"] = "no-cache",
+                        ["User-Agent"] = "Mozilla/5.0",
+                    },
+                }
+            )
+
+        if ok then
+            if type(response) == "string" then
+                body = response
+            elseif type(response) == "table" then
+                body =
+                    response.Body
+                    or response.body
             end
-        )
+        end
+    end
 
-    if
-        not ok
-        or type(body)
-            ~= "string"
-    then
+    if type(body) ~= "string" then
 
+        local ok,
+            result =
+            pcall(
+                function()
+                    return
+                        game:HttpGet(
+                            url,
+                            true
+                        )
+                end
+            )
+
+        if ok and type(result) == "string" then
+            body = result
+        end
+    end
+
+    if type(body) ~= "string" then
         return nil
     end
 
@@ -7901,7 +7970,6 @@ local function decodeHTTPJSON(url)
     local decodeOK =
         pcall(
             function()
-
                 decoded =
                     HttpService:
                     JSONDecode(
@@ -7915,13 +7983,11 @@ local function decodeHTTPJSON(url)
         or type(decoded)
             ~= "table"
     then
-
         return nil
     end
 
     return decoded
 end
-
 
 local function getUniversePlacesForPlaza()
 
@@ -8068,6 +8134,16 @@ local function discoverTradingPlazaPlaces()
                     score,
             }
         end
+    end
+
+    -- Reliable fallback for the current 2026 Trading Hub.
+    if not seen[KNOWN_TRADING_HUB_PLACE_ID] then
+        seen[KNOWN_TRADING_HUB_PLACE_ID] = true
+        result[#result + 1] = {
+            Id = KNOWN_TRADING_HUB_PLACE_ID,
+            Name = "Trading Hub",
+            Score = 110,
+        }
     end
 
     table.sort(
@@ -8463,6 +8539,36 @@ end
 
 local function routeNormalServerToPlaza()
 
+    local currentPlaceId =
+        tonumber(
+            game.PlaceId
+        )
+
+    -- Fast path: recognize the current Hub without any HTTP dependency.
+    if currentPlaceId == KNOWN_TRADING_HUB_PLACE_ID then
+
+        PlazaRouter.currentIsPlaza =
+            true
+
+        PlazaRouter.currentPlazaPlaceId =
+            currentPlaceId
+
+        PlazaRouter.readyForTrading =
+            true
+
+        markCurrentPlazaServer()
+
+        plazaLog(
+            "TRADING HUB DETECTED • DIRECT PLACE ID",
+            currentPlaceId,
+            "HOP IN",
+            valueText(Settings.plazaHopMinutes),
+            "MIN"
+        )
+
+        return true
+    end
+
     local plazaPlaces =
         discoverTradingPlazaPlaces()
 
@@ -8471,11 +8577,6 @@ local function routeNormalServerToPlaza()
 
     PlazaRouter.lastClassification =
         os.clock()
-
-    local currentPlaceId =
-        tonumber(
-            game.PlaceId
-        )
 
     for _,
         place in ipairs(
@@ -8684,6 +8785,20 @@ local function hopCurrentTradingPlaza()
 end
 
 
+plazaLog(
+    "ROUTER BOOT",
+    "ENABLED=",
+    Settings.plazaAutoRoute
+    and "YES"
+    or "NO",
+    "PLACE=",
+    game.PlaceId,
+    "HOP=",
+    Settings.plazaHopMinutes,
+    "MIN"
+)
+
+
 -- Heartbeat for multi-clone collision avoidance.
 task.spawn(
     function()
@@ -8810,6 +8925,9 @@ task.spawn(
             local started =
                 os.clock()
 
+            local nextStatusLog =
+                60
+
             while
                 Gui.Parent
                 and PlazaRouter.currentIsPlaza
@@ -8818,6 +8936,28 @@ task.spawn(
                     - started
                     < seconds
             do
+
+                local elapsed =
+                    os.clock()
+                    - started
+
+                if elapsed >= nextStatusLog then
+
+                    plazaLog(
+                        "HOP TIMER",
+                        math.max(
+                            0,
+                            math.ceil(
+                                (seconds - elapsed) / 60
+                            )
+                        ),
+                        "MIN LEFT"
+                    )
+
+                    nextStatusLog =
+                        nextStatusLog
+                        + 60
+                end
 
                 task.wait(
                     5
@@ -9010,6 +9150,9 @@ local State = {
     changedAt =
         nil,
 
+    theirChangedAt =
+        nil,
+
     acceptedSignature =
         nil,
 
@@ -9088,6 +9231,9 @@ local function resetState()
         0
 
     State.changedAt =
+        nil
+
+    State.theirChangedAt =
         nil
 
     State.acceptedSignature =
@@ -9877,6 +10023,12 @@ testLog(
 )
 
 testLog(
+    "PARTNER REBUILD DELAY =",
+    Settings.partnerRebuildDelay,
+    "SEC OF NO CHANGES"
+)
+
+testLog(
     "SECOND CONFIRM DELAY =",
     Settings.secondConfirmDelay,
     "SEC"
@@ -10207,6 +10359,9 @@ local function manageAutoTrade(trade)
         State.lastTheirSignature =
             theirSignature
 
+        State.theirChangedAt =
+            os.clock()
+
         State.theirRevision =
             (
                 State.theirRevision
@@ -10231,7 +10386,9 @@ local function manageAutoTrade(trade)
                 "THEIR OFFER CHANGED",
                 "REV=",
                 State.theirRevision,
-                "-> REBUILD"
+                "-> WAIT",
+                Settings.partnerRebuildDelay,
+                "SEC BEFORE REBUILD"
             )
         end
     end
@@ -10363,6 +10520,42 @@ local function manageAutoTrade(trade)
 
             decline()
         end
+
+        return
+    end
+
+    -- PARTNER OFFER DEBOUNCE. Every add/remove on THEIR side restarts
+    -- this full timer. We do not evaluate or rebuild until they have stopped
+    -- changing their offer for the whole window.
+    local partnerRebuildDelay =
+        math.max(
+            0,
+            tonumber(
+                Settings.partnerRebuildDelay
+            )
+            or 10
+        )
+
+    local partnerWaited =
+        os.clock()
+        - (
+            State.theirChangedAt
+            or os.clock()
+        )
+
+    local partnerRemaining =
+        partnerRebuildDelay
+        - partnerWaited
+
+    if partnerRemaining > 0 then
+
+        setTestStatus(
+            string.format(
+                "THEIR OFFER CHANGING • REBUILD IN %.1fs",
+                partnerRemaining
+            ),
+            C.YELLOW
+        )
 
         return
     end
