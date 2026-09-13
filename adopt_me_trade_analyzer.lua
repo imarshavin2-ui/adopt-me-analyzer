@@ -1,41 +1,4 @@
 repeat task.wait() until game:IsLoaded()
-
---============================================================
--- ADOPT ME TRADE ANALYZER V11.7.8
--- FULL MONOLITHIC BUILD
---
--- PAGES:
---   TRADE
---   VALUES
---   UPDATES
---   SETTINGS
---   TEST
---
--- TEST:
---   TEST AUTO ACCEPT
---   AUTO TRADE
---
--- AUTO TRADE:
---   random player
---   trade request
---   highest safe item as showcase
---   wait for their items
---   calculate AMVGG
---   NEW <24H = 0
---   UNKNOWN = BLOCK
---   optimize our side to MIN PROFIT cap
---   dynamic rebuild whenever partner changes offer
---   interrupt stale rebuild if partner changes mid-build
---   >= MIN PROFIT = ACCEPT
---   ask add
---   wait 40 sec
---   decline if still bad
---   recheck after ACCEPT
---   recheck before CONFIRM
---   post-trade inventory rescan
---============================================================
-
-
 --============================================================
 -- SERVICES
 --============================================================
@@ -72,13 +35,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.8"
+    "11.7.9"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1178"
+    "AdoptMeTradeAnalyzerV1179"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1178"
+    "AM_ANALYZER_BOOT_V1179"
 
 
 print(
@@ -86,7 +49,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] DYNAMIC REBUILD + V11.6.2 AMVGG VARIANT ENGINE"
+    "[AM V" .. VERSION .. "] DYNAMIC REBUILD + MIN VALUE FILTERS + V11.6.2 VARIANT ENGINE"
 )
 
 
@@ -136,6 +99,8 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1175",
     "AdoptMeTradeAnalyzerV1176",
     "AdoptMeTradeAnalyzerV1177",
+    "AdoptMeTradeAnalyzerV1178",
+    "AdoptMeTradeAnalyzerV1179",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -148,6 +113,8 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1175",
     "AM_ANALYZER_BOOT_V1176",
     "AM_ANALYZER_BOOT_V1177",
+    "AM_ANALYZER_BOOT_V1178",
+    "AM_ANALYZER_BOOT_V1179",
 }
 
 
@@ -2759,6 +2726,21 @@ local Settings = {
     minProfitPercent =
         10,
 
+    -- Minimum-value filter mode:
+    -- ALL      -> ALL MIN ITEM VALUE applies to both sides.
+    -- SEPARATE -> MY and THEIR thresholds are independent.
+    minValueMode =
+        "ALL",
+
+    myMinItemValue =
+        0.0003,
+
+    theirMinItemValue =
+        0.0003,
+
+    allMinItemValue =
+        0.0003,
+
     requestTimeout =
         15,
 
@@ -2922,6 +2904,62 @@ do
             end
         end
     end
+end
+
+-- Saved settings from older versions may not have the new fields, and an
+-- old/corrupt settings file could theoretically leave both automation modes
+-- enabled. Normalize everything once at boot.
+Settings.minValueMode =
+    tostring(Settings.minValueMode or "ALL"):upper()
+
+if
+    Settings.minValueMode ~= "ALL"
+    and Settings.minValueMode ~= "SEPARATE"
+then
+    Settings.minValueMode = "ALL"
+end
+
+Settings.myMinItemValue =
+    math.max(0, tonumber(Settings.myMinItemValue) or 0.0003)
+
+Settings.theirMinItemValue =
+    math.max(0, tonumber(Settings.theirMinItemValue) or 0.0003)
+
+Settings.allMinItemValue =
+    math.max(0, tonumber(Settings.allMinItemValue) or 0.0003)
+
+-- Maximum one automation mode at a time. If an old save somehow has both ON,
+-- real AUTO TRADE wins and TEST AUTO TRADE is switched off.
+if Settings.autoTrade and Settings.testAutoAccept then
+    Settings.testAutoAccept = false
+end
+
+local function activeMinItemValue(side)
+
+    if Settings.minValueMode == "ALL" then
+        return
+            math.max(
+                0,
+                tonumber(Settings.allMinItemValue)
+                or 0
+            )
+    end
+
+    if side == "theirs" then
+        return
+            math.max(
+                0,
+                tonumber(Settings.theirMinItemValue)
+                or 0
+            )
+    end
+
+    return
+        math.max(
+            0,
+            tonumber(Settings.myMinItemValue)
+            or 0
+        )
 end
 
 
@@ -3562,6 +3600,17 @@ local function evaluateOffer(
         options.allowEstimated
         == true
 
+    local minValue =
+        math.max(
+            0,
+            tonumber(options.minValue)
+            or 0
+        )
+
+    local ignoreBelowMin =
+        options.ignoreBelowMin
+        == true
+
     local result = {
 
         total =
@@ -3579,6 +3628,9 @@ local function evaluateOffer(
         newIgnored =
             0,
 
+        belowMin =
+            0,
+
         unknownNames =
             {},
 
@@ -3586,6 +3638,9 @@ local function evaluateOffer(
             {},
 
         newNames =
+            {},
+
+        belowMinNames =
             {},
 
         items =
@@ -3609,16 +3664,50 @@ local function evaluateOffer(
                 item
             )
 
-        result.items[
-            #result.items + 1
-        ] = {
+        local row = {
 
             raw =
                 item,
 
             data =
                 data,
+
+            ignoredByMin =
+                false,
         }
+
+        result.items[
+            #result.items + 1
+        ] = row
+
+        local function addKnownValue()
+
+            if
+                type(data.value) == "number"
+                and data.value < minValue
+            then
+
+                result.belowMin =
+                    result.belowMin
+                    + 1
+
+                result.belowMinNames[
+                    #result.belowMinNames + 1
+                ] =
+                    data.name
+
+                row.ignoredByMin =
+                    ignoreBelowMin
+
+                if ignoreBelowMin then
+                    return
+                end
+            end
+
+            result.total =
+                result.total
+                + data.value
+        end
 
         if data.known then
 
@@ -3650,17 +3739,11 @@ local function evaluateOffer(
                     allowEstimated
                     or not Settings.blockEstimated
                 then
-
-                    result.total =
-                        result.total
-                        + data.value
+                    addKnownValue()
                 end
 
             else
-
-                result.total =
-                    result.total
-                    + data.value
+                addKnownValue()
             end
 
         else
@@ -4320,6 +4403,8 @@ local function valuedInventory()
                 or not Settings.blockEstimated
             )
             and data.value > 0
+            and data.value
+                >= activeMinItemValue("mine")
             -- AUTO TRADE must never build an offer from guessed pet values.
             -- Estimated values may still be displayed outside AUTO TRADE,
             -- but the optimizer only receives exact AMVGG variants.
@@ -6260,7 +6345,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1320
+        1540
     )
 
 TestCanvas.BackgroundTransparency =
@@ -6311,7 +6396,7 @@ local AutoToggle =
 local function renderModes()
 
     TestToggle.Text =
-        "TEST AUTO ACCEPT: "
+        "TEST AUTO TRADE: "
         .. (
             Settings.testAutoAccept
             and "ON"
@@ -6354,6 +6439,7 @@ Connect(
             not Settings.testAutoAccept
 
         if Settings.testAutoAccept then
+            -- TEST AUTO TRADE and AUTO TRADE are mutually exclusive.
             Settings.autoTrade = false
         end
 
@@ -6372,6 +6458,7 @@ Connect(
             not Settings.autoTrade
 
         if Settings.autoTrade then
+            -- AUTO TRADE and TEST AUTO TRADE are mutually exclusive.
             Settings.testAutoAccept = false
 
             -- Real AUTO TRADE is always strict. The old estimated-value
@@ -6393,7 +6480,7 @@ renderModes()
 -- so the whole test/auto-trade setup is available from one tab.
 label(
     TestCanvas,
-    "AUTO TRADE / TEST SETTINGS",
+    "AUTO TRADE / TEST AUTO TRADE SETTINGS",
 
     UDim2.new(
         1,
@@ -6759,6 +6846,160 @@ bindNumber(
 )
 
 
+--============================================================
+-- MIN ITEM VALUE FILTERS
+--============================================================
+
+local MinValueModeToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.new(
+            1,
+            -24,
+            0,
+            36
+        ),
+
+        UDim2.fromOffset(
+            10,
+            557
+        )
+    )
+
+
+local MyMinValueInput =
+    settingInput(
+        "MY MIN ITEM VALUE",
+        Settings.myMinItemValue,
+        601
+    )
+
+
+local TheirMinValueInput =
+    settingInput(
+        "THEIR MIN ITEM VALUE",
+        Settings.theirMinItemValue,
+        639
+    )
+
+
+local AllMinValueInput =
+    settingInput(
+        "ALL MIN ITEM VALUE",
+        Settings.allMinItemValue,
+        677
+    )
+
+
+local MinValueStatus =
+    label(
+        TestCanvas,
+        "",
+
+        UDim2.new(
+            1,
+            -24,
+            0,
+            42
+        ),
+
+        UDim2.fromOffset(
+            12,
+            715
+        ),
+
+        Enum.Font.Code,
+        9,
+        C.ACCENT
+    )
+
+MinValueStatus.TextWrapped = true
+MinValueStatus.TextYAlignment = Enum.TextYAlignment.Top
+
+
+local function renderMinValueMode()
+
+    MinValueModeToggle.Text =
+        "MIN VALUE MODE: "
+        .. tostring(
+            Settings.minValueMode
+        )
+
+    MinValueModeToggle.BackgroundColor3 =
+        Settings.minValueMode == "ALL"
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+
+    MinValueStatus.Text =
+        "ACTIVE FILTER • MY >= "
+        .. valueText(
+            activeMinItemValue("mine")
+        )
+        .. " • THEIR >= "
+        .. valueText(
+            activeMinItemValue("theirs")
+        )
+end
+
+
+MinValueModeToggle.Activated:
+Connect(
+    function()
+
+        Settings.minValueMode =
+            Settings.minValueMode == "ALL"
+            and "SEPARATE"
+            or "ALL"
+
+        saveSettings()
+        renderMinValueMode()
+    end
+)
+
+
+bindNumber(
+    MyMinValueInput,
+    "myMinItemValue",
+    0,
+    1000
+)
+
+bindNumber(
+    TheirMinValueInput,
+    "theirMinItemValue",
+    0,
+    1000
+)
+
+bindNumber(
+    AllMinValueInput,
+    "allMinItemValue",
+    0,
+    1000
+)
+
+-- Refresh the active-filter text immediately after a numeric edit.
+for _, input in ipairs({
+    MyMinValueInput,
+    TheirMinValueInput,
+    AllMinValueInput,
+}) do
+    input.FocusLost:Connect(
+        function()
+            task.defer(renderMinValueMode)
+        end
+    )
+end
+
+renderMinValueMode()
+
+
 label(
     TestCanvas,
     "ALLOWED ITEMS • blank = all",
@@ -6770,7 +7011,7 @@ label(
 
     UDim2.fromOffset(
         12,
-        557
+        763
     ),
 
     Enum.Font.GothamBold,
@@ -6796,7 +7037,7 @@ local AllowedInput =
 
         UDim2.fromOffset(
             12,
-            583
+            789
         )
     )
 
@@ -6834,7 +7075,7 @@ local ChatToggle =
 
         UDim2.fromOffset(
             10,
-            655
+            861
         )
     )
 
@@ -6853,7 +7094,7 @@ local ScanInventory =
 
         UDim2.fromOffset(
             10,
-            699
+            905
         )
     )
 
@@ -7020,7 +7261,7 @@ local LogBox =
 
         UDim2.fromOffset(
             12,
-            751
+            957
         )
     )
 
@@ -7478,12 +7719,29 @@ local function evaluateTrade(
                 allowEstimated =
                     Settings.allowEstimatedOwnPets
                     == true,
+
+                minValue =
+                    activeMinItemValue("mine"),
+
+                -- Never hide value that WE are giving. Below-min OUR items
+                -- remain counted for W/F/L, then automated modes block them.
+                ignoreBelowMin =
+                    false,
             }
         )
 
     local theirs =
         evaluateOffer(
-            theirOffer
+            theirOffer,
+            {
+                minValue =
+                    activeMinItemValue("theirs"),
+
+                -- THEIR exact items below the selected floor do not count
+                -- toward THEM TOTAL.
+                ignoreBelowMin =
+                    true,
+            }
         )
 
     local result = {
@@ -7521,12 +7779,29 @@ local function evaluateTrade(
         return result
     end
 
+    -- Our automated modes must never ACCEPT while our side contains a unit
+    -- below MY/ALL minimum. The optimizer/showcase already filters these out,
+    -- so this mainly protects against a manual/stale item in the offer.
+    if
+        (Settings.autoTrade or Settings.testAutoAccept)
+        and mine.belowMin > 0
+    then
+
+        result.blocked =
+            true
+
+        result.reason =
+            "OUR ITEM < MIN VALUE"
+
+        return result
+    end
+
     -- CRITICAL AUTO-TRADE SAFETY:
     -- Never make a real trade decision from fallback multipliers such as
     -- regularValue*0.70 or megaValue*0.88. Those are not AMVGG's exact
     -- potion/variant values and can be very far from the calculator.
     if
-        Settings.autoTrade
+        (Settings.autoTrade or Settings.testAutoAccept)
         and (
             mine.estimated > 0
             or theirs.estimated > 0
@@ -7804,12 +8079,22 @@ end
 
 testLog(
     "TEST TAB READY",
-    "AUTO TRADE CONTROLS LOADED"
+    "AUTO TRADE + TEST AUTO TRADE • EXCLUSIVE MODES"
+)
+
+testLog(
+    "MIN VALUE",
+    "MODE=",
+    Settings.minValueMode,
+    "MY=",
+    valueText(activeMinItemValue("mine")),
+    "THEIR=",
+    valueText(activeMinItemValue("theirs"))
 )
 
 
 --============================================================
--- TEST AUTO ACCEPT
+-- TEST AUTO TRADE
 --============================================================
 
 local TestBadSignature =
@@ -8283,6 +8568,30 @@ local function manageAutoTrade(trade)
     end
 
     if
+        evaluation.mine.belowMin > 0
+        or evaluation.theirs.belowMin > 0
+    then
+
+        testLog(
+            "MIN VALUE FILTER",
+            "MODE=",
+            Settings.minValueMode,
+            "MY<MIN=",
+            evaluation.mine.belowMin,
+            "THEIR<MIN IGNORED=",
+            evaluation.theirs.belowMin,
+            "MY MIN=",
+            valueText(
+                activeMinItemValue("mine")
+            ),
+            "THEIR MIN=",
+            valueText(
+                activeMinItemValue("theirs")
+            )
+        )
+    end
+
+    if
         State.evaluationLoggedSignature
         ~= signature
     then
@@ -8325,6 +8634,9 @@ local function manageAutoTrade(trade)
                 row.data.estimated
                 and "(EST)"
                 or "",
+                row.ignoredByMin
+                and "(<MIN IGNORED)"
+                or "",
                 row.data.analysis
                 and row.data.analysis.field
                 and (
@@ -8352,6 +8664,9 @@ local function manageAutoTrade(trade)
                 ),
                 row.data.estimated
                 and "(EST)"
+                or "",
+                row.ignoredByMin
+                and "(<MIN IGNORED)"
                 or "",
                 row.data.analysis
                 and row.data.analysis.field
