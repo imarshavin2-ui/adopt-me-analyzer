@@ -1,7 +1,7 @@
 repeat task.wait() until game:IsLoaded()
 
 --============================================================
--- ADOPT ME TRADE ANALYZER V11.7.7
+-- ADOPT ME TRADE ANALYZER V11.7.8
 -- FULL MONOLITHIC BUILD
 --
 -- PAGES:
@@ -24,6 +24,8 @@ repeat task.wait() until game:IsLoaded()
 --   NEW <24H = 0
 --   UNKNOWN = BLOCK
 --   optimize our side to MIN PROFIT cap
+--   dynamic rebuild whenever partner changes offer
+--   interrupt stale rebuild if partner changes mid-build
 --   >= MIN PROFIT = ACCEPT
 --   ask add
 --   wait 40 sec
@@ -70,13 +72,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.7"
+    "11.7.8"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1177"
+    "AdoptMeTradeAnalyzerV1178"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1177"
+    "AM_ANALYZER_BOOT_V1178"
 
 
 print(
@@ -84,7 +86,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] AUTO TRADE + V11.6.2 AMVGG VARIANT ENGINE"
+    "[AM V" .. VERSION .. "] DYNAMIC REBUILD + V11.6.2 AMVGG VARIANT ENGINE"
 )
 
 
@@ -4747,8 +4749,51 @@ end
 
 local function rebuildOurOffer(
     myOffer,
-    desired
+    desired,
+    expectedTheirSignature
 )
+
+    -- The other player can add/remove/replace units while we are
+    -- rebuilding our side. Never finish a stale build.
+    local function liveTheirSignature()
+
+        local trade =
+            getTrade()
+
+        if not trade then
+            return nil
+        end
+
+        local _,
+            currentTheirOffer =
+            getTradeSides(
+                trade
+            )
+
+        if not currentTheirOffer then
+            return nil
+        end
+
+        return
+            offerSignature(
+                currentTheirOffer
+            )
+    end
+
+    local function theirOfferStillCurrent()
+
+        if expectedTheirSignature == nil then
+            return true
+        end
+
+        return
+            liveTheirSignature()
+            == expectedTheirSignature
+    end
+
+    if not theirOfferStillCurrent() then
+        return false, "THEIR_CHANGED"
+    end
 
     local current =
         currentUIDSet(
@@ -4806,9 +4851,17 @@ local function rebuildOurOffer(
                     actionDelay
                 )
 
+                if not theirOfferStillCurrent() then
+                    return false, "THEIR_CHANGED"
+                end
+
                 removeOurItem(
                     uid
                 )
+
+                if not theirOfferStillCurrent() then
+                    return false, "THEIR_CHANGED"
+                end
             end
         end
     end
@@ -4824,6 +4877,10 @@ local function rebuildOurOffer(
         )
         * 0.5
     )
+
+    if not theirOfferStillCurrent() then
+        return false, "THEIR_CHANGED"
+    end
 
     -- Add every selected unit one by one, with a visible delay.
     for _,
@@ -4842,9 +4899,17 @@ local function rebuildOurOffer(
                 actionDelay
             )
 
+            if not theirOfferStillCurrent() then
+                return false, "THEIR_CHANGED"
+            end
+
             addOurItem(
                 candidate.uid
             )
+
+            if not theirOfferStillCurrent() then
+                return false, "THEIR_CHANGED"
+            end
         end
     end
 
@@ -4858,7 +4923,11 @@ local function rebuildOurOffer(
         )
     )
 
-    return true
+    if not theirOfferStillCurrent() then
+        return false, "THEIR_CHANGED"
+    end
+
+    return true, nil
 end
 
 --============================================================
@@ -7103,6 +7172,15 @@ local State = {
     lastSignature =
         nil,
 
+    lastOurSignature =
+        nil,
+
+    lastTheirSignature =
+        nil,
+
+    theirRevision =
+        0,
+
     changedAt =
         nil,
 
@@ -7161,6 +7239,15 @@ local function resetState()
 
     State.lastSignature =
         nil
+
+    State.lastOurSignature =
+        nil
+
+    State.lastTheirSignature =
+        nil
+
+    State.theirRevision =
+        0
 
     State.changedAt =
         nil
@@ -7951,12 +8038,25 @@ local function manageAutoTrade(trade)
         return
     end
 
-    local signature =
-        fullSignature(
-            myOffer,
+    local ourSignature =
+        offerSignature(
+            myOffer
+        )
+
+    local theirSignature =
+        offerSignature(
             theirOffer
         )
 
+    local signature =
+        ourSignature
+        .. " >>> "
+        .. theirSignature
+
+    -- Any visible trade change invalidates an ACCEPT countdown.
+    -- But ONLY a change on THEIR side invalidates our optimization.
+    -- This prevents our own add/remove actions from triggering the
+    -- optimizer over and over again.
     if
         State.lastSignature
         ~= signature
@@ -7994,10 +8094,51 @@ local function manageAutoTrade(trade)
 
         State.evaluationLoggedSignature =
             nil
+    end
 
+    if
+        State.lastTheirSignature
+        ~= theirSignature
+    then
+
+        local hadPrevious =
+            State.lastTheirSignature
+            ~= nil
+
+        State.lastTheirSignature =
+            theirSignature
+
+        State.theirRevision =
+            (
+                State.theirRevision
+                or 0
+            )
+            + 1
+
+        -- Their offer is a new target. Recalculate our whole side.
         State.optimizedSignature =
             nil
+
+        -- Give them a fresh ADD window for every meaningful change.
+        State.askStarted =
+            nil
+
+        State.askSignature =
+            nil
+
+        if hadPrevious then
+
+            testLog(
+                "THEIR OFFER CHANGED",
+                "REV=",
+                State.theirRevision,
+                "-> REBUILD"
+            )
+        end
     end
+
+    State.lastOurSignature =
+        ourSignature
 
     local myCount =
         countOfferItems(
@@ -8228,18 +8369,10 @@ local function manageAutoTrade(trade)
     -- ALWAYS OPTIMIZE OUR SIDE BEFORE ACCEPT
     -- Their offer stays fixed; choose the most valuable combination
     -- from our inventory that still keeps MIN PROFIT.
-    local theirSignature =
-        offerSignature(
-            theirOffer
-        )
-
     if
         State.optimizedSignature
         ~= theirSignature
     then
-
-        State.optimizedSignature =
-            theirSignature
 
         local desired,
             ourValue,
@@ -8300,10 +8433,48 @@ local function manageAutoTrade(trade)
                 )
             end
 
-            rebuildOurOffer(
-                myOffer,
-                desired
-            )
+            local rebuildOK,
+                rebuildReason =
+                rebuildOurOffer(
+                    myOffer,
+                    desired,
+                    theirSignature
+                )
+
+            if not rebuildOK then
+
+                State.optimizedSignature =
+                    nil
+
+                State.acceptReadySignature =
+                    nil
+
+                State.acceptReadySince =
+                    nil
+
+                State.changedAt =
+                    os.clock()
+
+                setTestStatus(
+                    "THEIR OFFER CHANGED • REBUILD",
+                    C.YELLOW
+                )
+
+                testLog(
+                    "REBUILD INTERRUPTED",
+                    tostring(
+                        rebuildReason
+                        or "UNKNOWN"
+                    ),
+                    "-> RECALCULATE"
+                )
+
+                return
+            end
+
+            -- Mark this exact partner offer as successfully balanced.
+            State.optimizedSignature =
+                theirSignature
 
             State.acceptReadySignature =
                 nil
@@ -8316,6 +8487,12 @@ local function manageAutoTrade(trade)
 
             return
         end
+
+        -- Nothing from our inventory can fit below the current cap.
+        -- Remember this partner signature so we do not recalculate it
+        -- every frame; a new item from them clears it automatically.
+        State.optimizedSignature =
+            theirSignature
     end
 
     -- ACCEPT ONLY AFTER OUR OFFER WAS BALANCED
