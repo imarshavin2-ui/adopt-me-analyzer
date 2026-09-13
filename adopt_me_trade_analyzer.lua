@@ -1,4 +1,5 @@
 repeat task.wait() until game:IsLoaded()
+
 --============================================================
 -- SERVICES
 --============================================================
@@ -35,13 +36,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.9"
+    "11.7.10"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV1179"
+    "AdoptMeTradeAnalyzerV11710"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V1179"
+    "AM_ANALYZER_BOOT_V11710"
 
 
 print(
@@ -49,7 +50,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] DYNAMIC REBUILD + MIN VALUE FILTERS + V11.6.2 VARIANT ENGINE"
+    "[AM V" .. VERSION .. "] WAIT WINDOWS + DYNAMIC REBUILD + MIN VALUE FILTERS + V11.6.2 VARIANT ENGINE"
 )
 
 
@@ -101,6 +102,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV1177",
     "AdoptMeTradeAnalyzerV1178",
     "AdoptMeTradeAnalyzerV1179",
+    "AdoptMeTradeAnalyzerV11710",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -115,6 +117,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V1177",
     "AM_ANALYZER_BOOT_V1178",
     "AM_ANALYZER_BOOT_V1179",
+    "AM_ANALYZER_BOOT_V11710",
 }
 
 
@@ -2744,11 +2747,13 @@ local Settings = {
     requestTimeout =
         15,
 
+    -- Full wait AFTER our first showcase item is actually sent.
     firstItemTimeout =
-        25,
+        50,
 
+    -- Fresh wait after every later partner-offer change / add request.
     addTimeout =
-        40,
+        70,
 
     playerCooldown =
         300,
@@ -2756,8 +2761,9 @@ local Settings = {
     settleSeconds =
         2,
 
+    -- Long enough that repeated 70-second add windows are not cut off early.
     maxTradeSeconds =
-        120,
+        600,
 
     newItemHours =
         24,
@@ -2776,6 +2782,14 @@ local Settings = {
 
     optimizerBeam =
         350,
+
+    -- Wait before exposing our highest safe showcase item at trade start.
+    showcaseDelay =
+        5,
+
+    -- Migration marker so old saved 25/40 timing values become 50/70 once.
+    waitWindowProfile =
+        0,
 
     -- Delay between every add/remove action in our offer.
     -- This prevents the bot from dumping many units into the trade at once.
@@ -2927,6 +2941,29 @@ Settings.theirMinItemValue =
 
 Settings.allMinItemValue =
     math.max(0, tonumber(Settings.allMinItemValue) or 0.0003)
+
+-- V11.7.10 timing migration. Existing users keep the same settings file,
+-- so force the new wait-window defaults once instead of silently loading
+-- the old 25s / 40s values forever.
+if tonumber(Settings.waitWindowProfile) ~= 1 then
+    Settings.firstItemTimeout = 50
+    Settings.addTimeout = 70
+    Settings.showcaseDelay = 5
+    Settings.maxTradeSeconds = math.max(600, tonumber(Settings.maxTradeSeconds) or 0)
+    Settings.waitWindowProfile = 1
+end
+
+Settings.firstItemTimeout =
+    math.max(5, tonumber(Settings.firstItemTimeout) or 50)
+
+Settings.addTimeout =
+    math.max(5, tonumber(Settings.addTimeout) or 70)
+
+Settings.showcaseDelay =
+    math.max(0, tonumber(Settings.showcaseDelay) or 5)
+
+Settings.maxTradeSeconds =
+    math.max(180, tonumber(Settings.maxTradeSeconds) or 600)
 
 -- Maximum one automation mode at a time. If an old save somehow has both ON,
 -- real AUTO TRADE wins and TEST AUTO TRADE is switched off.
@@ -6345,7 +6382,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1540
+        1600
     )
 
 TestCanvas.BackgroundTransparency =
@@ -6714,11 +6751,19 @@ local ItemActionDelayInput =
     )
 
 
+local ShowcaseDelayInput =
+    settingInput(
+        "SHOWCASE DELAY",
+        Settings.showcaseDelay,
+        474
+    )
+
+
 local PreAcceptDelayInput =
     settingInput(
         "PRE ACCEPT DELAY",
         Settings.preAcceptDelay,
-        474
+        512
     )
 
 
@@ -6726,7 +6771,7 @@ local PostRebuildDelayInput =
     settingInput(
         "POST REBUILD WAIT",
         Settings.postRebuildDelay,
-        512
+        550
     )
 
 
@@ -6831,6 +6876,14 @@ bindNumber(
 
 
 bindNumber(
+    ShowcaseDelayInput,
+    "showcaseDelay",
+    0,
+    30
+)
+
+
+bindNumber(
     PreAcceptDelayInput,
     "preAcceptDelay",
     0,
@@ -6864,7 +6917,7 @@ local MinValueModeToggle =
 
         UDim2.fromOffset(
             10,
-            557
+            595
         )
     )
 
@@ -6873,7 +6926,7 @@ local MyMinValueInput =
     settingInput(
         "MY MIN ITEM VALUE",
         Settings.myMinItemValue,
-        601
+        639
     )
 
 
@@ -6881,7 +6934,7 @@ local TheirMinValueInput =
     settingInput(
         "THEIR MIN ITEM VALUE",
         Settings.theirMinItemValue,
-        639
+        677
     )
 
 
@@ -6889,7 +6942,7 @@ local AllMinValueInput =
     settingInput(
         "ALL MIN ITEM VALUE",
         Settings.allMinItemValue,
-        677
+        715
     )
 
 
@@ -6907,7 +6960,7 @@ local MinValueStatus =
 
         UDim2.fromOffset(
             12,
-            715
+            753
         ),
 
         Enum.Font.Code,
@@ -7011,7 +7064,7 @@ label(
 
     UDim2.fromOffset(
         12,
-        763
+        801
     ),
 
     Enum.Font.GothamBold,
@@ -7037,7 +7090,7 @@ local AllowedInput =
 
         UDim2.fromOffset(
             12,
-            789
+            827
         )
     )
 
@@ -7075,7 +7128,7 @@ local ChatToggle =
 
         UDim2.fromOffset(
             10,
-            861
+            899
         )
     )
 
@@ -7094,7 +7147,7 @@ local ScanInventory =
 
         UDim2.fromOffset(
             10,
-            905
+            943
         )
     )
 
@@ -7261,7 +7314,7 @@ local LogBox =
 
         UDim2.fromOffset(
             12,
-            957
+            995
         )
     )
 
@@ -7449,6 +7502,9 @@ local State = {
     initialAsk =
         false,
 
+    showcaseAddedAt =
+        nil,
+
     declineSent =
         false,
 
@@ -7516,6 +7572,9 @@ local function resetState()
 
     State.initialAsk =
         false
+
+    State.showcaseAddedAt =
+        nil
 
     State.declineSent =
         false
@@ -8435,19 +8494,69 @@ local function manageAutoTrade(trade)
             theirOffer
         )
 
-    -- SHOW MOST EXPENSIVE SAFE ITEM
+    -- SHOW MOST EXPENSIVE SAFE ITEM, BUT DO NOT EXPOSE IT INSTANTLY.
+    -- The countdown begins when the trade itself starts.
     if myCount == 0 then
+
+        local requiredShowcaseDelay =
+            math.max(
+                0,
+                tonumber(
+                    Settings.showcaseDelay
+                )
+                or 5
+            )
+
+        local showcaseElapsed =
+            os.clock()
+            - (State.tradeStarted or os.clock())
+
+        local showcaseRemaining =
+            requiredShowcaseDelay
+            - showcaseElapsed
+
+        if showcaseRemaining > 0 then
+
+            setTestStatus(
+                string.format(
+                    "SHOWCASE IN %.1fs",
+                    showcaseRemaining
+                ),
+                C.YELLOW
+            )
+
+            return
+        end
 
         setTestStatus(
             "SHOWCASE",
             C.YELLOW
         )
 
-        showcase(
-            myOffer
-        )
+        local added =
+            showcase(
+                myOffer
+            )
+
+        if added and not State.showcaseAddedAt then
+            State.showcaseAddedAt =
+                os.clock()
+
+            testLog(
+                "FIRST ITEM SENT",
+                "THEM GET",
+                Settings.firstItemTimeout,
+                "SECONDS"
+            )
+        end
 
         return
+    end
+
+    -- If the client replicated our showcase between loops before we recorded
+    -- the timestamp, start the first-item window now rather than from trade start.
+    if not State.showcaseAddedAt then
+        State.showcaseAddedAt = os.clock()
     end
 
     -- WAIT FOR THEM
@@ -8469,7 +8578,11 @@ local function manageAutoTrade(trade)
 
         local elapsed =
             os.clock()
-            - State.tradeStarted
+            - (
+                State.showcaseAddedAt
+                or State.tradeStarted
+                or os.clock()
+            )
 
         setTestStatus(
             "WAIT ITEM "
@@ -8945,7 +9058,10 @@ local function manageAutoTrade(trade)
         )
 
         testLog(
-            "ASK ADD"
+            "ASK ADD",
+            "WINDOW=",
+            Settings.addTimeout,
+            "SECONDS"
         )
     end
 
