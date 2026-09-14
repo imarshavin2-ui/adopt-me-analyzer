@@ -1,8 +1,5 @@
 repeat task.wait() until game:IsLoaded()
 
-
-
-
 --============================================================
 -- SERVICES
 --============================================================
@@ -45,13 +42,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.15"
+    "11.7.16"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11715"
+    "AdoptMeTradeAnalyzerV11716"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11715"
+    "AM_ANALYZER_BOOT_V11716"
 
 
 print(
@@ -59,7 +56,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] SETTINGS-ONLY AUTO TRADE + SAFE HOP + TRADE-END GUARD"
+    "[AM V" .. VERSION .. "] SETTINGS-ONLY AUTO TRADE + 100S ASK-ADD WINDOW + SAFE HOP"
 )
 
 
@@ -116,6 +113,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV11712",
     "AdoptMeTradeAnalyzerV11713",
     "AdoptMeTradeAnalyzerV11714",
+    "AdoptMeTradeAnalyzerV11715",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -135,6 +133,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V11712",
     "AM_ANALYZER_BOOT_V11713",
     "AM_ANALYZER_BOOT_V11714",
+    "AM_ANALYZER_BOOT_V11715",
 }
 
 
@@ -2765,9 +2764,14 @@ local Settings = {
     firstItemTimeout =
         50,
 
-    -- Fresh wait after every later partner-offer change / add request.
+    -- Fresh wait after ASK ADD. If THEIR offer does not change for this
+    -- entire window, decline. Any real partner add/remove starts a fresh window.
     addTimeout =
-        70,
+        100,
+
+    -- One-time migration marker for the new 100-second ASK ADD window.
+    askAddWindowProfile =
+        0,
 
     playerCooldown =
         300,
@@ -2989,11 +2993,27 @@ if tonumber(Settings.waitWindowProfile) ~= 1 then
     Settings.waitWindowProfile = 1
 end
 
+-- V11.7.16 ASK ADD migration. Old default was 70 seconds. Move that
+-- default to 100 once, but preserve a custom value the user already chose.
+if tonumber(Settings.askAddWindowProfile) ~= 1 then
+    if
+        tonumber(Settings.addTimeout) == nil
+        or math.abs(
+            (tonumber(Settings.addTimeout) or 0)
+            - 70
+        ) < 0.000001
+    then
+        Settings.addTimeout = 100
+    end
+
+    Settings.askAddWindowProfile = 1
+end
+
 Settings.firstItemTimeout =
     math.max(5, tonumber(Settings.firstItemTimeout) or 50)
 
 Settings.addTimeout =
-    math.max(5, tonumber(Settings.addTimeout) or 70)
+    math.max(5, tonumber(Settings.addTimeout) or 100)
 
 Settings.showcaseDelay =
     math.max(0, tonumber(Settings.showcaseDelay) or 5)
@@ -6571,7 +6591,7 @@ local ProfitInput =
 
 local AddTimeoutInput =
     settingInput(
-        "ADD TIMEOUT",
+        "ASK ADD TIMEOUT",
         Settings.addTimeout,
         240
     )
@@ -9873,6 +9893,12 @@ testLog(
 )
 
 testLog(
+    "ASK ADD TIMEOUT =",
+    Settings.addTimeout,
+    "SEC • RESETS WHEN PARTNER CHANGES OFFER"
+)
+
+testLog(
     "MIN VALUE",
     "MODE=",
     Settings.minValueMode,
@@ -10685,7 +10711,9 @@ local function manageAutoTrade(trade)
         myOffer
     )
 
-    -- ASK ADD
+    -- ASK ADD: start a fresh inactivity window. If THEIR offer does not
+    -- change for the full timeout, decline. A partner add/remove changes
+    -- theirSignature and starts a brand-new window after recalculation.
     if
         not State.askStarted
         or State.askSignature
@@ -10704,9 +10732,9 @@ local function manageAutoTrade(trade)
 
         testLog(
             "ASK ADD",
-            "WINDOW=",
+            "INACTIVITY WINDOW=",
             Settings.addTimeout,
-            "SECONDS"
+            "SECONDS • DECLINE IF THEIR OFFER DOES NOT CHANGE"
         )
     end
 
