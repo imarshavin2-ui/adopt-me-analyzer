@@ -42,13 +42,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.16"
+    "11.7.18"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11716"
+    "AdoptMeTradeAnalyzerV11718"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11716"
+    "AM_ANALYZER_BOOT_V11718"
 
 
 print(
@@ -56,7 +56,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] SETTINGS-ONLY AUTO TRADE + 100S ASK-ADD WINDOW + SAFE HOP"
+    "[AM V" .. VERSION .. "] THEIR-SIDE JUNK FILTER + OWN-SIDE COUNTING + 65S UNKNOWN BLOCK + 100S ASK-ADD"
 )
 
 
@@ -114,6 +114,8 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV11713",
     "AdoptMeTradeAnalyzerV11714",
     "AdoptMeTradeAnalyzerV11715",
+    "AdoptMeTradeAnalyzerV11716",
+    "AdoptMeTradeAnalyzerV11717",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -134,6 +136,8 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V11713",
     "AM_ANALYZER_BOOT_V11714",
     "AM_ANALYZER_BOOT_V11715",
+    "AM_ANALYZER_BOOT_V11716",
+    "AM_ANALYZER_BOOT_V11717",
 }
 
 
@@ -1263,6 +1267,258 @@ local function getVariant(item)
     return "NP"
 end
 
+
+--============================================================
+-- PET TRADE FILTER
+--============================================================
+-- Incoming-side rules:
+--   1) ANY plain Neon/Mega (variant N or M) without Fly/Ride is ignored.
+--   2) Plain NP pets from Common rarity OR the custom junk list below
+--      are ignored without Fly/Ride.
+--   3) Any potion variant is counted normally.
+-- Our-side rules:
+--   Common/custom-junk pets are still counted and can be selected by
+--   the optimizer so the account can get rid of them faster.
+local CommonPetFilter = {}
+
+do
+    local commonNames = {
+        ["buffalo"] = true,
+        ["cat"] = true,
+        ["dog"] = true,
+        ["otter"] = true,
+        ["chicken"] = true,
+        ["robin"] = true,
+        ["bandicoot"] = true,
+        ["chick"] = true,
+        ["tasmanian tiger"] = true,
+        ["ground sloth"] = true,
+        ["stingray"] = true,
+        ["wolpertinger"] = true,
+        ["walrus"] = true,
+        ["bullfrog"] = true,
+        ["ant"] = true,
+        ["mouse"] = true,
+        ["dugong"] = true,
+        ["sado mole"] = true,
+        ["bali starling"] = true,
+        ["malayan tapir"] = true,
+        ["malaysian tapir"] = true,
+        ["maleo bird"] = true,
+        ["liger"] = true,
+        ["mosquito"] = true,
+        ["piranha"] = true,
+        ["flying fish"] = true,
+        ["bluebottle fly"] = true,
+        ["mongoose"] = true,
+        ["cockroach"] = true,
+        ["beluga whale"] = true,
+        ["beluga"] = true,
+        ["armadillo"] = true,
+        ["coyote"] = true,
+        ["sandfish"] = true,
+        ["brachiosaurus"] = true,
+        ["garden snake"] = true,
+        ["classic teapot"] = true,
+        ["kid goat"] = true,
+        ["show pony"] = true,
+        ["urchin"] = true,
+        ["frankenfeline"] = true,
+        ["ratatoskr"] = true,
+        ["hopbop"] = true,
+        ["bakeneko"] = true,
+        ["burtaur"] = true,
+        ["blue butterfly"] = true,
+        ["island tarsier"] = true,
+        ["tegu"] = true,
+        ["aye aye"] = true,
+        ["japanese snow fairy"] = true,
+        ["california condor"] = true,
+        ["galapagos sea lion"] = true,
+        ["jiggly jerboa"] = true,
+        ["rubber ducky"] = true,
+        ["dirty ducky"] = true,
+        ["red panda ducky"] = true,
+        ["gecko ducky"] = true,
+        ["sheepdog ducky"] = true,
+        ["ghost"] = true,
+        ["angelfish"] = true,
+        ["ash zebra"] = true,
+        ["forest sprite"] = true,
+        ["ms. muffet"] = true,
+        ["ms muffet"] = true,
+        ["pinkypillar"] = true,
+    }
+
+    -- Extra pets the user does not want to receive as plain NP.
+    -- Keep aliases for likely spelling variants so matching stays robust.
+    local customUnwantedNames = {
+        ["cat"] = true,
+        ["tegu"] = true,
+        ["buffalo"] = true,
+        ["beaver"] = true,
+        ["bunny"] = true,
+        ["dog"] = true,
+        ["snow cat"] = true,
+        ["zebra"] = true,
+        ["tree frog"] = true,
+        ["donkey"] = true,
+        ["fennec fox"] = true,
+        ["fennex fox"] = true,
+        ["chocolate labrador"] = true,
+        ["orangutan"] = true,
+        ["rabbit"] = true,
+        ["puma"] = true,
+        ["mouse"] = true,
+        ["otter"] = true,
+        ["snow puma"] = true,
+        ["camel"] = true,
+        ["ant"] = true,
+        ["crimson cape"] = true,
+        ["granny wolf"] = true,
+        ["clumpty"] = true,
+    }
+
+    local function rarityText(value)
+        if type(value) == "string" then
+            return value:lower()
+        end
+
+        if type(value) == "table" then
+            local nested =
+                value.name
+                or value.Name
+                or value.value
+                or value.Value
+
+            if type(nested) == "string" then
+                return nested:lower()
+            end
+        end
+
+        return nil
+    end
+
+    function CommonPetFilter.isCommon(item)
+        if
+            type(item) ~= "table"
+            or tostring(item.category or "") ~= "pets"
+        then
+            return false
+        end
+
+        local p =
+            type(item.properties) == "table"
+            and item.properties
+            or {}
+
+        local candidates = {
+            item.rarity,
+            item.pet_rarity,
+            item.petRarity,
+            item.rarity_name,
+            item.rarityName,
+            p.rarity,
+            p.pet_rarity,
+            p.petRarity,
+            p.rarity_name,
+            p.rarityName,
+        }
+
+        for _, value in ipairs(candidates) do
+            local rarity = rarityText(value)
+
+            if rarity == "common" then
+                return true
+            end
+
+            if
+                rarity
+                and rarity ~= ""
+                and rarity ~= "unknown"
+            then
+                return false
+            end
+        end
+
+        local name =
+            normalize(
+                getItemName(item)
+            )
+
+        return commonNames[name] == true
+    end
+
+    function CommonPetFilter.isCustomUnwanted(item)
+        if
+            type(item) ~= "table"
+            or tostring(item.category or "") ~= "pets"
+        then
+            return false
+        end
+
+        local name =
+            normalize(
+                getItemName(item)
+            )
+
+        return customUnwantedNames[name] == true
+    end
+
+    function CommonPetFilter.isBaseUnwanted(item)
+        return
+            CommonPetFilter.isCommon(item)
+            or CommonPetFilter.isCustomUnwanted(item)
+    end
+
+    function CommonPetFilter.hasPotion(item)
+        if type(item) ~= "table" then
+            return false
+        end
+
+        local p =
+            type(item.properties) == "table"
+            and item.properties
+            or {}
+
+        return
+            p.flyable == true
+            or p.rideable == true
+    end
+
+    function CommonPetFilter.shouldIgnoreIncoming(item)
+        if
+            type(item) ~= "table"
+            or tostring(item.category or "") ~= "pets"
+            or CommonPetFilter.hasPotion(item)
+        then
+            return false, nil
+        end
+
+        local variant =
+            getVariant(item)
+
+        -- Global rule: plain Neon/Mega without potion is worthless to us.
+        if variant == "N" or variant == "M" then
+            return true, "PLAIN " .. variant .. " NO F/R"
+        end
+
+        -- Plain NP is ignored only for Common/custom junk names.
+        if
+            variant == "NP"
+            and CommonPetFilter.isBaseUnwanted(item)
+        then
+            return true, "UNWANTED NP NO F/R"
+        end
+
+        return false, nil
+    end
+
+    function CommonPetFilter.shouldBypassOurMinimum(item)
+        return CommonPetFilter.isBaseUnwanted(item)
+    end
+end
+
 local function variantColor(v)
     if v:find("M", 1, true) then
         return C.PURPLE
@@ -2114,6 +2370,58 @@ local function findAMVGG(item)
 end
 
 
+
+-- Live AMVGG rarity metadata, when present, is stronger than the fallback list.
+do
+    local fallbackIsCommon =
+        CommonPetFilter.isCommon
+
+    CommonPetFilter.isCommon =
+        function(item)
+            if
+                type(item) ~= "table"
+                or tostring(item.category or "") ~= "pets"
+            then
+                return false
+            end
+
+            local entry, source =
+                findAMVGG(item)
+
+            if type(entry) == "table" and source == "pets" then
+                local rarity =
+                    entry.rarity
+                    or entry.pet_rarity
+                    or entry.petRarity
+                    or entry.rarity_name
+                    or entry.rarityName
+
+                if type(rarity) == "table" then
+                    rarity =
+                        rarity.name
+                        or rarity.Name
+                        or rarity.value
+                        or rarity.Value
+                end
+
+                if type(rarity) == "string" then
+                    local lowered = rarity:lower()
+
+                    if lowered == "common" then
+                        return true
+                    end
+
+                    if lowered ~= "" and lowered ~= "unknown" then
+                        return false
+                    end
+                end
+            end
+
+            return fallbackIsCommon(item)
+        end
+end
+
+
 --============================================================
 -- AMVGG V11.6.2 VARIANT VALUE ENGINE
 -- Exact calculator logic restored from the proven V11.6.2 build.
@@ -2769,6 +3077,11 @@ local Settings = {
     addTimeout =
         100,
 
+    -- BLOCK UNKNOWN wait window. If an UNKNOWN item remains unchanged for
+    -- this many seconds, decline. Any partner offer change starts a fresh wait.
+    unknownBlockTimeout =
+        65,
+
     -- One-time migration marker for the new 100-second ASK ADD window.
     askAddWindowProfile =
         0,
@@ -2852,6 +3165,11 @@ local Settings = {
         true,
 
     blockEstimated =
+        true,
+
+    -- Incoming-side junk filter. Potion variants still count.
+    -- Also ignores every plain Neon/Mega (N/M) from the other player.
+    excludeUnwantedIncomingNoPotion =
         true,
 }
 
@@ -3014,6 +3332,12 @@ Settings.firstItemTimeout =
 
 Settings.addTimeout =
     math.max(5, tonumber(Settings.addTimeout) or 100)
+
+Settings.unknownBlockTimeout =
+    math.max(5, tonumber(Settings.unknownBlockTimeout) or 65)
+
+Settings.excludeUnwantedIncomingNoPotion =
+    Settings.excludeUnwantedIncomingNoPotion ~= false
 
 Settings.showcaseDelay =
     math.max(0, tonumber(Settings.showcaseDelay) or 5)
@@ -3735,6 +4059,12 @@ local function evaluateOffer(
         belowMin =
             0,
 
+        unwantedIncomingIgnored =
+            0,
+
+        unwantedIncomingNames =
+            {},
+
         unknownNames =
             {},
 
@@ -3778,17 +4108,58 @@ local function evaluateOffer(
 
             ignoredByMin =
                 false,
+
+            ignoredIncomingUnwanted =
+                false,
+
+            ignoredIncomingReason =
+                nil,
+
+            bypassedOwnMinimum =
+                false,
         }
 
         result.items[
             #result.items + 1
         ] = row
 
+        if
+            Settings.excludeUnwantedIncomingNoPotion
+            and options.ignoreUnwantedIncomingNoPotion == true
+        then
+            local shouldIgnore, ignoreReason =
+                CommonPetFilter.shouldIgnoreIncoming(
+                    item
+                )
+
+            if shouldIgnore then
+                result.unwantedIncomingIgnored =
+                    result.unwantedIncomingIgnored
+                    + 1
+
+                result.unwantedIncomingNames[
+                    #result.unwantedIncomingNames + 1
+                ] =
+                    data.name
+
+                row.ignoredIncomingUnwanted = true
+                row.ignoredIncomingReason = ignoreReason
+                continue
+            end
+        end
+
         local function addKnownValue()
+
+            local bypassOwnMinimum =
+                options.bypassOwnMinimumForUnwanted == true
+                and CommonPetFilter.shouldBypassOurMinimum(
+                    item
+                )
 
             if
                 type(data.value) == "number"
                 and data.value < minValue
+                and not bypassOwnMinimum
             then
 
                 result.belowMin =
@@ -3806,6 +4177,12 @@ local function evaluateOffer(
                 if ignoreBelowMin then
                     return
                 end
+            elseif
+                type(data.value) == "number"
+                and data.value < minValue
+                and bypassOwnMinimum
+            then
+                row.bypassedOwnMinimum = true
             end
 
             result.total =
@@ -4507,8 +4884,13 @@ local function valuedInventory()
                 or not Settings.blockEstimated
             )
             and data.value > 0
-            and data.value
-                >= activeMinItemValue("mine")
+            and (
+                data.value
+                    >= activeMinItemValue("mine")
+                or CommonPetFilter.shouldBypassOurMinimum(
+                    item
+                )
+            )
             -- AUTO TRADE must never build an offer from guessed pet values.
             -- Estimated values may still be displayed outside AUTO TRADE,
             -- but the optimizer only receives exact AMVGG variants.
@@ -6320,7 +6702,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1580
+        1640
     )
 
 TestCanvas.BackgroundTransparency =
@@ -7276,6 +7658,74 @@ do
         60
     )
 end
+
+do
+    local UnknownBlockTimeoutInput =
+        settingInput(
+            "UNKNOWN BLOCK TIMEOUT",
+            Settings.unknownBlockTimeout,
+            1418
+        )
+
+    bindNumber(
+        UnknownBlockTimeoutInput,
+        "unknownBlockTimeout",
+        5,
+        300
+    )
+end
+
+local UnwantedIncomingToggle =
+    button(
+        TestCanvas,
+        "",
+
+        UDim2.new(
+            1,
+            -24,
+            0,
+            36
+        ),
+
+        UDim2.fromOffset(
+            10,
+            1462
+        )
+    )
+
+local function renderUnwantedIncoming()
+
+    UnwantedIncomingToggle.Text =
+        "IGNORE THEIR N/M + JUNK NP W/O F/R: "
+        .. (
+            Settings.excludeUnwantedIncomingNoPotion
+            and "ON"
+            or "OFF"
+        )
+
+    UnwantedIncomingToggle.BackgroundColor3 =
+        Settings.excludeUnwantedIncomingNoPotion
+        and Color3.fromRGB(
+            40,
+            105,
+            70
+        )
+        or C.PANEL2
+end
+
+UnwantedIncomingToggle.Activated:
+Connect(
+    function()
+
+        Settings.excludeUnwantedIncomingNoPotion =
+            not Settings.excludeUnwantedIncomingNoPotion
+
+        saveSettings()
+        renderUnwantedIncoming()
+    end
+)
+
+renderUnwantedIncoming()
 
 
 local function setTestStatus(
@@ -9063,6 +9513,12 @@ local State = {
     askSignature =
         nil,
 
+    unknownStarted =
+        nil,
+
+    unknownSignature =
+        nil,
+
     initialAsk =
         false,
 
@@ -9144,6 +9600,12 @@ local function resetState()
         nil
 
     State.askSignature =
+        nil
+
+    State.unknownStarted =
+        nil
+
+    State.unknownSignature =
         nil
 
     State.initialAsk =
@@ -9376,6 +9838,11 @@ local function evaluateTrade(
                 -- remain counted for W/F/L, then automated modes block them.
                 ignoreBelowMin =
                     false,
+
+                -- OUR Common/custom-junk pets stay fully counted and may
+                -- bypass MY MIN so the bot can unload them faster.
+                bypassOwnMinimumForUnwanted =
+                    true,
             }
         )
 
@@ -9389,6 +9856,11 @@ local function evaluateTrade(
                 -- THEIR exact items below the selected floor do not count
                 -- toward THEM TOTAL.
                 ignoreBelowMin =
+                    true,
+
+                -- THEIR plain N/M without potion are ignored globally.
+                -- Plain NP is also ignored for Common/custom-junk pets.
+                ignoreUnwantedIncomingNoPotion =
                     true,
             }
         )
@@ -9899,6 +10371,19 @@ testLog(
 )
 
 testLog(
+    "UNKNOWN BLOCK TIMEOUT =",
+    Settings.unknownBlockTimeout,
+    "SEC"
+)
+
+testLog(
+    "THEIR JUNK FILTER =",
+    Settings.excludeUnwantedIncomingNoPotion
+    and "ON"
+    or "OFF"
+)
+
+testLog(
     "MIN VALUE",
     "MODE=",
     Settings.minValueMode,
@@ -10101,6 +10586,12 @@ local function manageAutoTrade(trade)
             nil
 
         State.askSignature =
+            nil
+
+        State.unknownStarted =
+            nil
+
+        State.unknownSignature =
             nil
 
         if hadPrevious then
@@ -10310,6 +10801,75 @@ local function manageAutoTrade(trade)
             myOffer
         )
 
+        -- UNKNOWN gets a dedicated wait window instead of blocking forever.
+        -- Any partner add/remove resets this timer through theirSignature.
+        if tostring(evaluation.reason) == "UNKNOWN" then
+
+            if
+                not State.unknownStarted
+                or State.unknownSignature
+                    ~= theirSignature
+            then
+
+                State.unknownStarted =
+                    os.clock()
+
+                State.unknownSignature =
+                    theirSignature
+
+                testLog(
+                    "BLOCK UNKNOWN",
+                    "WAIT",
+                    Settings.unknownBlockTimeout,
+                    "SECONDS FOR PARTNER CHANGE"
+                )
+            end
+
+            local unknownElapsed =
+                os.clock()
+                - State.unknownStarted
+
+            local unknownRemaining =
+                math.max(
+                    0,
+                    math.ceil(
+                        Settings.unknownBlockTimeout
+                        - unknownElapsed
+                    )
+                )
+
+            setTestStatus(
+                "BLOCK UNKNOWN "
+                .. unknownRemaining
+                .. "s",
+                C.RED
+            )
+
+            if
+                unknownElapsed
+                >= Settings.unknownBlockTimeout
+                and not State.declineSent
+            then
+
+                State.declineSent =
+                    true
+
+                testLog(
+                    "BLOCK UNKNOWN TIMEOUT -> DECLINE"
+                )
+
+                decline()
+            end
+
+            return
+        end
+
+        State.unknownStarted =
+            nil
+
+        State.unknownSignature =
+            nil
+
         setTestStatus(
             "BLOCK "
             .. tostring(
@@ -10336,6 +10896,12 @@ local function manageAutoTrade(trade)
 
         return
     end
+
+    State.unknownStarted =
+        nil
+
+    State.unknownSignature =
+        nil
 
     if
         evaluation.mine.newIgnored > 0
@@ -10372,6 +10938,17 @@ local function manageAutoTrade(trade)
             valueText(
                 activeMinItemValue("theirs")
             )
+        )
+    end
+
+    if
+        evaluation.theirs.unwantedIncomingIgnored > 0
+    then
+
+        testLog(
+            "THEIR JUNK FILTER",
+            "IGNORED=",
+            evaluation.theirs.unwantedIncomingIgnored
         )
     end
 
@@ -10421,6 +10998,9 @@ local function manageAutoTrade(trade)
                 row.ignoredByMin
                 and "(<MIN IGNORED)"
                 or "",
+                row.bypassedOwnMinimum
+                and "(OWN JUNK <MIN COUNTED)"
+                or "",
                 row.data.analysis
                 and row.data.analysis.field
                 and (
@@ -10451,6 +11031,16 @@ local function manageAutoTrade(trade)
                 or "",
                 row.ignoredByMin
                 and "(<MIN IGNORED)"
+                or "",
+                row.ignoredIncomingUnwanted
+                and (
+                    "(THEIR IGNORED "
+                    .. tostring(
+                        row.ignoredIncomingReason
+                        or "JUNK"
+                    )
+                    .. ")"
+                )
                 or "",
                 row.data.analysis
                 and row.data.analysis.field
