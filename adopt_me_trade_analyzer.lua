@@ -42,13 +42,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.18"
+    "11.7.19"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11718"
+    "AdoptMeTradeAnalyzerV11719"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11718"
+    "AM_ANALYZER_BOOT_V11719"
 
 
 print(
@@ -116,6 +116,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV11715",
     "AdoptMeTradeAnalyzerV11716",
     "AdoptMeTradeAnalyzerV11717",
+    "AdoptMeTradeAnalyzerV11718",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -138,6 +139,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V11715",
     "AM_ANALYZER_BOOT_V11716",
     "AM_ANALYZER_BOOT_V11717",
+    "AM_ANALYZER_BOOT_V11718",
 }
 
 
@@ -3155,7 +3157,11 @@ local Settings = {
         true,
 
     plazaHopMinutes =
-        20,
+        15,
+
+    -- One-time migration marker: move the old default 20-minute hop to 15.
+    plazaHopProfile =
+        0,
 
     -- Many low/mid pets on AMVGG do not expose an exact NP/R/F field and
     -- fall back to our variant estimate. Allow those estimates only for
@@ -3351,8 +3357,24 @@ Settings.secondConfirmDelay =
 Settings.partnerRebuildDelay =
     math.max(0, tonumber(Settings.partnerRebuildDelay) or 10)
 
+-- V11.7.19 PLAZA HOP migration. The previous default was 20 minutes.
+-- Move that default to 15 once, while preserving any other custom value.
+if tonumber(Settings.plazaHopProfile) ~= 1 then
+    if
+        tonumber(Settings.plazaHopMinutes) == nil
+        or math.abs(
+            (tonumber(Settings.plazaHopMinutes) or 0)
+            - 20
+        ) < 0.000001
+    then
+        Settings.plazaHopMinutes = 15
+    end
+
+    Settings.plazaHopProfile = 1
+end
+
 Settings.plazaHopMinutes =
-    math.max(0, tonumber(Settings.plazaHopMinutes) or 20)
+    math.max(0, tonumber(Settings.plazaHopMinutes) or 15)
 
 if Settings.plazaAutoRoute == nil then
     Settings.plazaAutoRoute = true
@@ -9200,7 +9222,7 @@ task.spawn(
             local hopMinutes =
                 math.max(
                     0,
-                    tonumber(Settings.plazaHopMinutes) or 20
+                    tonumber(Settings.plazaHopMinutes) or 15
                 )
 
             if hopMinutes <= 0 then
