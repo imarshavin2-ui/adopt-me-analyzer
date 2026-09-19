@@ -42,13 +42,13 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.19"
+    "11.7.20"
 
 local GUI_NAME =
-    "AdoptMeTradeAnalyzerV11719"
+    "AdoptMeTradeAnalyzerV11720"
 
 local BOOT_NAME =
-    "AM_ANALYZER_BOOT_V11719"
+    "AM_ANALYZER_BOOT_V11720"
 
 
 print(
@@ -117,6 +117,7 @@ local OLD_GUI_NAMES = {
     "AdoptMeTradeAnalyzerV11716",
     "AdoptMeTradeAnalyzerV11717",
     "AdoptMeTradeAnalyzerV11718",
+    "AdoptMeTradeAnalyzerV11719",
 
     "AM_ANALYZER_BOOT_V1153",
     "AM_ANALYZER_BOOT_V1160",
@@ -140,6 +141,7 @@ local OLD_GUI_NAMES = {
     "AM_ANALYZER_BOOT_V11716",
     "AM_ANALYZER_BOOT_V11717",
     "AM_ANALYZER_BOOT_V11718",
+    "AM_ANALYZER_BOOT_V11719",
 }
 
 
@@ -1381,6 +1383,14 @@ do
         ["clumpty"] = true,
     }
 
+    -- Ignore these eggs only on THEIR side; OUR copies still count normally.
+    local ignoredIncomingEggNames = {
+        ["cracked egg"]=true, ["basic egg"]=true, ["pet egg"]=true, ["fairytale egg"]=true,
+        ["endangered egg"]=true, ["retired egg"]=true, ["throwback egg"]=true, ["royal egg"]=true,
+        ["aztec egg"]=true, ["admin abuse egg"]=true, ["crystal egg"]=true, ["moon egg"]=true,
+        ["garden egg"]=true, ["royal fairytale egg"]=true,
+    }
+
     local function rarityText(value)
         if type(value) == "string" then
             return value:lower()
@@ -1486,6 +1496,11 @@ do
         return
             p.flyable == true
             or p.rideable == true
+    end
+
+    function CommonPetFilter.isIgnoredIncomingEgg(item)
+        return type(item) == "table"
+            and ignoredIncomingEggNames[normalize(getItemName(item))] == true
     end
 
     function CommonPetFilter.shouldIgnoreIncoming(item)
@@ -4144,6 +4159,16 @@ local function evaluateOffer(
         result.items[
             #result.items + 1
         ] = row
+
+        if options.ignoreIncomingEggs == true
+            and CommonPetFilter.isIgnoredIncomingEgg(item)
+        then
+            result.unwantedIncomingIgnored = result.unwantedIncomingIgnored + 1
+            result.unwantedIncomingNames[#result.unwantedIncomingNames + 1] = data.name
+            row.ignoredIncomingUnwanted = true
+            row.ignoredIncomingReason = "IGNORED EGG"
+            continue
+        end
 
         if
             Settings.excludeUnwantedIncomingNoPotion
@@ -9879,6 +9904,9 @@ local function evaluateTrade(
                 -- toward THEM TOTAL.
                 ignoreBelowMin =
                     true,
+
+                -- Listed eggs are worth 0 only on THEIR side.
+                ignoreIncomingEggs = true,
 
                 -- THEIR plain N/M without potion are ignored globally.
                 -- Plain NP is also ignored for Common/custom-junk pets.
