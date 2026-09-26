@@ -1,0 +1,660 @@
+-- AERO FPS / Gentle edition / Roblox client-side Luau
+-- Run on the client. In Studio: StarterPlayer > StarterPlayerScripts > LocalScript.
+-- BOOST applies the selected options; RESET restores our changes.
+-- No map deletion, texture removal, physics edits, or FPS-cap changes.
+-- Distant effects and saved graphics quality are optional and OFF by default.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+
+assert(RunService:IsClient(), "AERO FPS must run on the client")
+local player = Players.LocalPlayer
+assert(player, "LocalPlayer is unavailable")
+local playerGui = player:WaitForChild("PlayerGui")
+local GUI_NAME = "AeroFPSBoost_v1"
+
+-- Stop the previous copy, including its service connections and queued work.
+local previous = playerGui:FindFirstChild(GUI_NAME)
+if previous then
+    local stop = previous:FindFirstChild("Stop")
+    if stop and stop:IsA("BindableFunction") then
+        pcall(function() stop:Invoke() end)
+    end
+    previous:Destroy()
+end
+
+local alive = true
+local connections = {}
+local fpsConnection
+local engine
+local busy = false
+local dirty = false
+local selected = { shadows = true, post = true, water = true, distant = false, quality = false }
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    connections[#connections + 1] = connection
+    return connection
+end
+
+local function cleanup()
+    if not alive then return end
+    alive = false
+    if fpsConnection then fpsConnection:Disconnect() end
+    for _, connection in ipairs(connections) do connection:Disconnect() end
+    if engine then engine:Shutdown() end
+end
+
+local C = {
+    panel = Color3.fromRGB(16, 22, 33),
+    row = Color3.fromRGB(25, 33, 47),
+    border = Color3.fromRGB(47, 61, 79),
+    text = Color3.fromRGB(237, 244, 252),
+    muted = Color3.fromRGB(145, 162, 183),
+    cyan = Color3.fromRGB(77, 220, 210),
+    blue = Color3.fromRGB(77, 154, 255),
+    amber = Color3.fromRGB(255, 192, 104),
+}
+
+local function make(className, parent, properties)
+    local instance = Instance.new(className)
+    for key, value in pairs(properties or {}) do instance[key] = value end
+    instance.Parent = parent
+    return instance
+end
+
+local function round(object, radius)
+    local corner = object:FindFirstChildOfClass("UICorner") or make("UICorner", object)
+    corner.CornerRadius = UDim.new(0, radius)
+end
+
+local function outline(object, color, transparency)
+    return make("UIStroke", object, {
+        Color = color or C.border, Thickness = 1, Transparency = transparency or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    })
+end
+
+local function label(parent, name, text, position, size, textSize, color, font)
+    return make("TextLabel", parent, {
+        Name = name, BackgroundTransparency = 1, BorderSizePixel = 0,
+        Position = position, Size = size, Text = text, TextSize = textSize,
+        TextColor3 = color or C.text, Font = font or Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    })
+end
+
+local function button(parent, name, text, position, size, color)
+    local object = make("TextButton", parent, {
+        Name = name, Position = position, Size = size, Text = text,
+        BackgroundColor3 = color or C.row, BorderSizePixel = 0,
+        TextColor3 = C.text, TextSize = 14, Font = Enum.Font.GothamMedium,
+        AutoButtonColor = true,
+    })
+    round(object, 11)
+    return object
+end
+
+local gui = make("ScreenGui", playerGui, {
+    Name = GUI_NAME, ResetOnSpawn = false, IgnoreGuiInset = false,
+    ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
+    DisplayOrder = 100, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+connect(gui.Destroying, cleanup)
+local stop = make("BindableFunction", gui, { Name = "Stop" })
+stop.OnInvoke = function()
+    cleanup()
+    gui:Destroy()
+end
+
+local root = make("Frame", gui, {
+    Name = "SafeArea", Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+})
+local panel = make("Frame", root, {
+    Name = "Menu", AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(384, 530),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+})
+round(panel, 20)
+outline(panel)
+local panelScale = make("UIScale", panel, { Scale = 1 })
+local accent = make("Frame", panel, {
+    Position = UDim2.fromOffset(22, 0), Size = UDim2.new(1, -44, 0, 3),
+    BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+})
+round(accent, 3)
+make("UIGradient", accent, { Color = ColorSequence.new(C.cyan, C.blue) })
+
+label(panel, "Eyebrow", "AERO  /  GENTLE MODE", UDim2.fromOffset(22, 18), UDim2.fromOffset(285, 16), 10, C.cyan, Enum.Font.GothamBold)
+label(panel, "Title", "FPS Boost", UDim2.fromOffset(22, 39), UDim2.fromOffset(286, 29), 27, C.text, Enum.Font.GothamBold)
+label(panel, "Subtitle", "Карта, текстуры и физика сохраняются.", UDim2.fromOffset(22, 73), UDim2.fromOffset(340, 17), 12, C.muted)
+local close = button(panel, "CloseMenu", "×", UDim2.fromOffset(328, 18), UDim2.fromOffset(34, 34))
+close.TextSize = 24
+
+local boost = button(panel, "Boost", "BOOST FPS", UDim2.fromOffset(22, 103), UDim2.fromOffset(222, 46), Color3.new(1, 1, 1))
+boost.Font = Enum.Font.GothamBold
+boost.TextSize = 15
+boost.TextColor3 = C.panel
+make("UIGradient", boost, { Color = ColorSequence.new(C.cyan, C.blue) })
+local reset = button(panel, "Reset", "СБРОС", UDim2.fromOffset(252, 103), UDim2.fromOffset(110, 46))
+outline(reset)
+local status = label(panel, "Status", "Выбери опции и нажми BOOST FPS.", UDim2.fromOffset(22, 157), UDim2.fromOffset(340, 32), 11, C.muted)
+status.TextWrapped = true
+label(panel, "OptionsTitle", "ЧТО ОПТИМИЗИРОВАТЬ", UDim2.fromOffset(22, 195), UDim2.fromOffset(340, 14), 10, C.muted, Enum.Font.GothamBold)
+
+-- Exactly five option rows. They are applied together by the Boost button.
+local options = {
+    { "shadows", "Упростить тени" },
+    { "post", "Убрать Bloom и солнечные лучи" },
+    { "water", "Упростить эффекты воды" },
+    { "distant", "Дальние частицы: 250+ studs" },
+    { "quality", "Графика движка: до 3/10" },
+}
+
+local function switch(parent, name, title, y, enabled, callback, warning)
+    local row = button(parent, name, "", UDim2.fromOffset(22, y), UDim2.fromOffset(340, 36))
+    label(row, "Label", title, UDim2.fromOffset(12, 0), UDim2.fromOffset(271, 36), 12, warning and C.amber or C.text)
+    local track = make("Frame", row, {
+        Name = "Track", Position = UDim2.new(1, -48, 0.5, -10), Size = UDim2.fromOffset(36, 20),
+        BackgroundColor3 = enabled and C.cyan or C.border, BorderSizePixel = 0,
+    })
+    round(track, 10)
+    local knob = make("Frame", track, {
+        Name = "Knob", Position = UDim2.fromOffset(enabled and 18 or 2, 2), Size = UDim2.fromOffset(16, 16),
+        BackgroundColor3 = C.text, BorderSizePixel = 0,
+    })
+    round(knob, 8)
+    local function paint(value)
+        TweenService:Create(track, TweenInfo.new(0.12), { BackgroundColor3 = value and C.cyan or C.border }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.12), { Position = UDim2.fromOffset(value and 18 or 2, 2) }):Play()
+    end
+    connect(row.Activated, function()
+        local value = callback()
+        if value ~= nil then paint(value) end
+    end)
+    return row
+end
+
+for index, option in ipairs(options) do
+    local key = option[1]
+    switch(panel, key, option[2], 218 + (index - 1) * 42, selected[key], function()
+        if busy then return nil end
+        selected[key] = not selected[key]
+        dirty = true
+        if key == "distant" and selected[key] then
+            status.Text = "Дальние эффекты могут быть игровыми метками."
+            status.TextColor3 = C.amber
+        elseif key == "quality" and selected[key] then
+            status.Text = "Качество 3/10 может снизить дальность вида."
+            status.TextColor3 = C.amber
+        else
+            status.Text = "Настройки изменены. Нажми BOOST FPS."
+            status.TextColor3 = C.muted
+        end
+        return selected[key]
+    end, key == "distant" or key == "quality")
+end
+
+make("Frame", panel, {
+    Position = UDim2.fromOffset(22, 432), Size = UDim2.fromOffset(340, 1),
+    BackgroundColor3 = C.border, BorderSizePixel = 0,
+})
+local footer = label(panel, "Footer", "Сброс возвращает изменённые настройки.\nДальние эффекты и графика 3/10 — по желанию.", UDim2.fromOffset(22, 484), UDim2.fromOffset(340, 32), 10, C.muted)
+footer.TextWrapped = true
+
+local orb = button(root, "OpenMenu", "FPS", UDim2.new(0, 20, 1, -20), UDim2.fromOffset(56, 56), C.panel)
+orb.AnchorPoint = Vector2.new(0, 1)
+orb.ZIndex = 10
+orb.TextColor3 = C.cyan
+orb.Font = Enum.Font.GothamBold
+round(orb, 28)
+outline(orb, C.cyan, 0.2)
+local function toggleMenu()
+    panel.Visible = not panel.Visible
+    orb.Text = panel.Visible and "−" or "FPS"
+    orb.TextSize = panel.Visible and 28 or 14
+end
+orb.Text, orb.TextSize = "−", 28
+connect(orb.Activated, toggleMenu)
+connect(close.Activated, function()
+    if panel.Visible then toggleMenu() end
+end)
+
+local hud = make("Frame", root, {
+    Name = "FPSCounter", AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, -16, 0, 12), Size = UDim2.fromOffset(154, 64),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0, ZIndex = 20,
+})
+round(hud, 14)
+outline(hud)
+local hudTitle = label(hud, "Caption", "AERO  /  LIVE", UDim2.fromOffset(14, 9), UDim2.fromOffset(126, 13), 9, C.muted, Enum.Font.GothamBold)
+local fpsText = label(hud, "Value", "FPS: —", UDim2.fromOffset(14, 27), UDim2.fromOffset(126, 26), 23, C.cyan, Enum.Font.GothamBold)
+hudTitle.ZIndex, fpsText.ZIndex = 21, 21
+
+local showFPS = true
+local function setFPSVisible(visible)
+    showFPS = visible
+    hud.Visible = visible
+    if fpsConnection then
+        fpsConnection:Disconnect()
+        fpsConnection = nil
+    end
+    if not visible or not alive then return end
+    fpsText.Text = "FPS: —"
+    local frames, started = 0, os.clock()
+    fpsConnection = RunService.PreRender:Connect(function()
+        frames = frames + 1
+        local now = os.clock()
+        local elapsed = now - started
+        if elapsed < 0.5 then return end
+        local fps = math.floor(frames / elapsed + 0.5)
+        fpsText.Text = "FPS: " .. tostring(fps)
+        fpsText.TextColor3 = fps >= 55 and C.cyan or (fps >= 30 and C.amber or Color3.fromRGB(255, 125, 125))
+        frames, started = 0, now
+    end)
+end
+switch(panel, "ShowFPS", "Показывать счётчик FPS", 442, true, function()
+    setFPSVisible(not showFPS)
+    return showFPS
+end)
+setFPSVisible(true)
+
+local function fit()
+    local size = root.AbsoluteSize
+    if size.X <= 0 or size.Y <= 0 then return end
+    local scale = math.min(1, math.max(0.1, (size.X - 24) / 384), math.max(0.1, (size.Y - 24) / 530))
+    local overlapsHUD = size.X / 2 + 192 * scale > size.X - 170
+        and (size.Y - 530 * scale) / 2 < 88
+    if overlapsHUD then
+        scale = math.min(scale, math.max(0.1, (size.Y - 100) / 530))
+        panel.Position = UDim2.new(0.5, 0, 0.5, 38)
+    else
+        panel.Position = UDim2.fromScale(0.5, 0.5)
+    end
+    panelScale.Scale = scale
+end
+connect(root:GetPropertyChangedSignal("AbsoluteSize"), fit)
+task.defer(function() if alive then fit() end end)
+
+-- Reversible client-side optimizations; the caller supplies Lighting/Workspace/RunService/Players.
+local function newBoostEngine(onStatus)
+    local CollectionService = game:GetService("CollectionService")
+    local engine, ledger, conflicts = {}, {}, {}
+    local generation, changed, errors = 0, 0, 0
+    local destroyed, run = false, nil
+    local particleClasses = { ParticleEmitter = true, Smoke = true, Fire = true, Sparkles = true }
+
+    local function notify(state)
+        if onStatus and not destroyed then
+            pcall(onStatus, { state = state, changed = changed, errors = errors })
+        end
+    end
+    local function current(token)
+        return not destroyed and token == generation
+    end
+    local function stopRun()
+        if run then
+            for _, connection in ipairs(run.connections) do connection:Disconnect() end
+            run = nil
+        end
+    end
+    local function block(object, property)
+        local properties = conflicts[object]
+        if not properties then properties = {}; conflicts[object] = properties end
+        properties[property] = true
+    end
+    local function forget(object, property)
+        local properties = ledger[object]
+        if properties and properties[property] then
+            properties[property] = nil
+            changed = math.max(0, changed - 1)
+            if next(properties) == nil then ledger[object] = nil end
+        end
+    end
+    local function write(object, property, value)
+        if conflicts[object] and conflicts[object][property] then return end
+        local ok, existing = pcall(function() return object[property] end)
+        if not ok then errors = errors + 1; block(object, property); return end
+        local saved = ledger[object] and ledger[object][property]
+        if saved and existing ~= saved.applied then
+            forget(object, property)
+            block(object, property) -- Let the game's newer value win until another Apply.
+            return
+        end
+        if existing == value then return end
+        ok = pcall(function() object[property] = value end)
+        if not ok then errors = errors + 1; block(object, property); return end
+        if not saved then
+            saved = { original = existing, applied = value }
+            if not ledger[object] then ledger[object] = {} end
+            ledger[object][property] = saved
+            changed = changed + 1
+        else
+            saved.applied = value
+        end
+    end
+    local function restore(object, property)
+        local saved = ledger[object] and ledger[object][property]
+        if not saved then return end
+        local ok, existing = pcall(function() return object[property] end)
+        if ok and existing == saved.applied then
+            ok = pcall(function() object[property] = saved.original end)
+        elseif ok then
+            block(object, property)
+        end
+        if not ok then errors = errors + 1 end
+        forget(object, property)
+    end
+    local function restoreAll(token, synchronous)
+        local count, started = 0, os.clock()
+        while next(ledger) do
+            if not synchronous and not current(token) then return false end
+            local object, properties = next(ledger)
+            restore(object, next(properties))
+            count = count + 1
+            if not synchronous and (count >= 150 or os.clock() - started > 0.003) then
+                task.wait()
+                count, started = 0, os.clock()
+            end
+        end
+        return synchronous or current(token)
+    end
+
+    local function beginRun(token, options)
+        if not current(token) then return end
+        local state = {
+            connections = {}, queue = {}, pending = {}, head = 1, tail = 0,
+            stack = { { items = { Workspace, Lighting }, index = 1 } },
+            candidates = {}, candidateSet = {}, candidateIndex = 1,
+            positions = {}, moving = {},
+            protected = setmetatable({}, { __mode = "k" }),
+            overflow = false, scanned = false, lastRescan = os.clock(),
+        }
+        run = state
+        local function protectedMarker(object)
+            if object:IsA("ProximityPrompt") or object:IsA("ClickDetector")
+                or object:IsA("Humanoid") or object:IsA("Seat") or object:IsA("VehicleSeat") then
+                state.protected[object] = true
+                local ancestor = object.Parent
+                while ancestor and ancestor ~= Workspace do
+                    state.protected[ancestor] = true
+                    ancestor = ancestor.Parent
+                end
+            end
+        end
+        local function enqueue(object)
+            if not current(token) or state.pending[object] then return end
+            if options.distant then protectedMarker(object) end
+            if state.tail - state.head + 1 >= 2048 then
+                state.overflow = true -- Revisit the tree after the bounded event queue drains.
+                return
+            end
+            state.tail = state.tail + 1
+            state.queue[state.tail] = object
+            state.pending[object] = true
+        end
+        local function nextEvent()
+            if state.head > state.tail then return nil end
+            local object = state.queue[state.head]
+            state.queue[state.head] = nil
+            state.pending[object] = nil
+            state.head = state.head + 1
+            if state.head > state.tail then state.head, state.tail = 1, 0 end
+            return object
+        end
+        local function nextScanned()
+            while #state.stack > 0 do
+                local frame = state.stack[#state.stack]
+                local object = frame.items[frame.index]
+                if not object then
+                    state.stack[#state.stack] = nil
+                else
+                    frame.index = frame.index + 1
+                    if object.Parent then
+                        local children = object:GetChildren()
+                        if #children > 0 then
+                            state.stack[#state.stack + 1] = { items = children, index = 1 }
+                        end
+                        return object
+                    end
+                end
+            end
+            return nil
+        end
+        local function process(object)
+            if not object.Parent then return end
+            if not object:IsDescendantOf(Workspace) and not object:IsDescendantOf(Lighting) then return end
+            if options.shadows and object:IsA("Light") then write(object, "Shadows", false) end
+            if options.post and (object:IsA("BloomEffect") or object:IsA("SunRaysEffect")) then
+                write(object, "Enabled", false)
+            end
+            if options.distant then
+                protectedMarker(object)
+                -- Leave additional emitters untouched so nearby effects return promptly.
+                if particleClasses[object.ClassName] and not state.candidateSet[object] and #state.candidates < 256 then
+                    state.candidates[#state.candidates + 1] = object
+                    state.candidateSet[object] = true
+                end
+            end
+        end
+        local function hostPart(object)
+            local host = object.Parent
+            while host and host:IsA("Attachment") do
+                if host:IsA("Bone") then return nil end
+                host = host.Parent
+            end
+            if not host or not host:IsA("BasePart") or host:IsA("Terrain") or not host.Anchored then return nil end
+            local ancestor = object
+            while ancestor and ancestor ~= Workspace do
+                if state.protected[ancestor] or ancestor:IsA("Tool")
+                    or ancestor:GetAttribute("FPSBoostPreserve") == true
+                    or CollectionService:HasTag(ancestor, "FPSBoostPreserve") then return nil end
+                if ancestor:IsA("Model") and (Players:GetPlayerFromCharacter(ancestor)
+                    or ancestor:FindFirstChildOfClass("Humanoid")) then return nil end
+                if ancestor:FindFirstChildOfClass("ProximityPrompt")
+                    or ancestor:FindFirstChildOfClass("ClickDetector") then return nil end
+                ancestor = ancestor.Parent
+            end
+            if ancestor ~= Workspace then return nil end
+            return host
+        end
+        local function checkParticles()
+            local list = state.candidates
+            if #list == 0 then return end
+            local camera = Workspace.CurrentCamera
+            local player = Players.LocalPlayer
+            local character = player and player.Character
+            local anchor = character and character:FindFirstChild("HumanoidRootPart")
+            if anchor and not anchor:IsA("BasePart") then anchor = nil end
+            local started, count, maximum = os.clock(), 0, math.min(60, #list)
+            while count < maximum and #list > 0 do
+                if state.candidateIndex > #list then state.candidateIndex = 1 end
+                local index = state.candidateIndex
+                local object = list[index]
+                if not object.Parent or not object:IsDescendantOf(Workspace) then
+                    restore(object, "Enabled")
+                    state.candidateSet[object] = nil
+                    state.positions[object], state.moving[object] = nil, nil
+                    local last = #list
+                    list[index] = list[last]
+                    list[last] = nil
+                else
+                    local host = camera and anchor and hostPart(object)
+                    local previous = state.positions[object]
+                    local emissionPoint
+                    if host then
+                        emissionPoint = object.Parent:IsA("Attachment") and object.Parent.WorldPosition or host.Position
+                        if previous and (previous.host ~= host or previous.cframe ~= host.CFrame
+                            or previous.point ~= emissionPoint) then
+                            state.moving[object] = true
+                        end
+                        state.positions[object] = { host = host, cframe = host.CFrame, point = emissionPoint }
+                    end
+                    if not host or not previous or state.moving[object] then
+                        restore(object, "Enabled")
+                    else
+                        -- Use the whole host's bounding sphere, not only its center.
+                        local radius = host.Size.Magnitude * 0.5
+                        local cameraDistance = math.min((camera.CFrame.Position - host.Position).Magnitude - radius,
+                            (camera.CFrame.Position - emissionPoint).Magnitude)
+                        local playerDistance = math.min((anchor.Position - host.Position).Magnitude - radius,
+                            (anchor.Position - emissionPoint).Magnitude)
+                        if cameraDistance <= 200 or playerDistance <= 200 then
+                            restore(object, "Enabled")
+                        elseif cameraDistance > 250 and playerDistance > 250 then
+                            write(object, "Enabled", false)
+                        end
+                    end
+                    state.candidateIndex = index + 1
+                end
+                count = count + 1
+                if os.clock() - started > 0.002 then break end
+            end
+        end
+
+        state.connections[#state.connections + 1] = Workspace.DescendantAdded:Connect(enqueue)
+        state.connections[#state.connections + 1] = Lighting.DescendantAdded:Connect(enqueue)
+        local function removing(object)
+            if not ledger[object] and not conflicts[object] then return end
+            task.defer(function()
+                if not current(token) then return end
+                if not object:IsDescendantOf(Workspace) and not object:IsDescendantOf(Lighting) then
+                    local properties = ledger[object]
+                    while properties and next(properties) do restore(object, next(properties)) end
+                    conflicts[object] = nil
+                end
+            end)
+        end
+        state.connections[#state.connections + 1] = Workspace.DescendantRemoving:Connect(removing)
+        state.connections[#state.connections + 1] = Lighting.DescendantRemoving:Connect(removing)
+        if options.shadows then write(Lighting, "GlobalShadows", false) end
+        if options.water then
+            local terrain = Workspace:FindFirstChildOfClass("Terrain")
+            if terrain then
+                write(terrain, "WaterWaveSize", 0)
+                write(terrain, "WaterWaveSpeed", 0)
+                write(terrain, "WaterReflectance", 0)
+            end
+        end
+        if options.quality then
+            local ok, settings = pcall(function() return UserSettings():GetService("UserGameSettings") end)
+            if ok then
+                local readable, level = pcall(function() return settings.SavedQualityLevel.Value end)
+                if readable then
+                    if level == 0 or level > 3 then write(settings, "SavedQualityLevel", Enum.SavedQualitySetting.QualityLevel3) end
+                else errors = errors + 1 end
+            else errors = errors + 1 end
+        end
+        local lastReport = 0
+        while current(token) do
+            local started, count = os.clock(), 0
+            while count < 150 and os.clock() - started < 0.003 do
+                local object = nextScanned()
+                local added = nextEvent()
+                if not object and not added then break end
+                if object then process(object); count = count + 1 end
+                if added then process(added); count = count + 1 end
+            end
+            if #state.stack == 0 then state.scanned = true end
+            -- Wait until the first scan has found gameplay markers before touching effects.
+            if options.distant and state.scanned then checkParticles() end
+            local now = os.clock()
+            if state.overflow and #state.stack == 0 and state.head > state.tail and now - state.lastRescan >= 5 then
+                state.stack = { { items = { Workspace, Lighting }, index = 1 } }
+                state.overflow, state.lastRescan = false, now
+            end
+            if now - lastReport >= 0.5 then
+                notify(state.scanned and "active" or "scanning")
+                lastReport = now
+            end
+            task.wait((#state.stack > 0 or state.head <= state.tail) and 0 or 0.1)
+        end
+    end
+
+    function engine:Apply(options)
+        if destroyed then return end
+        generation = generation + 1
+        local token = generation
+        stopRun()
+        errors = 0
+        local chosen = {}
+        for _, key in ipairs({ "shadows", "post", "water", "distant", "quality" }) do
+            chosen[key] = options and options[key] == true
+        end
+        notify("restoring")
+        task.defer(function()
+            if not restoreAll(token, false) then return end
+            conflicts = {}
+            notify("scanning")
+            if current(token) then
+                if chosen.shadows or chosen.post or chosen.water or chosen.distant or chosen.quality then
+                    beginRun(token, chosen)
+                else
+                    notify("idle")
+                end
+            end
+        end)
+    end
+    function engine:Reset()
+        if destroyed then return end
+        generation = generation + 1
+        local token = generation
+        stopRun()
+        errors = 0
+        notify("restoring")
+        task.defer(function()
+            if restoreAll(token, false) then
+                conflicts = {}
+                notify("idle")
+            end
+        end)
+    end
+    function engine:Shutdown()
+        if destroyed then return end
+        generation = generation + 1
+        stopRun()
+        restoreAll(generation, true)
+        destroyed = true
+        conflicts = {}
+    end
+    return engine
+end
+
+engine = newBoostEngine(function(info)
+    if not alive then return end
+    busy = info.state == "scanning" or info.state == "restoring"
+    boost.AutoButtonColor = not busy
+    boost.Text = info.state == "scanning" and "ОПТИМИЗАЦИЯ…"
+        or (info.state == "restoring" and "ВОССТАНОВЛЕНИЕ…" or "BOOST FPS")
+    if dirty and info.state == "active" then return end
+    status.TextColor3 = (info.errors or 0) > 0 and C.amber or C.muted
+    if info.state == "scanning" then
+        status.Text = "Применяю настройки небольшими порциями…"
+    elseif info.state == "restoring" then
+        status.Text = "Возвращаю изменённые настройки…"
+    elseif info.state == "active" then
+        status.Text = string.format("Изменено свойств: %d  ·  Ошибок: %d\nBoost активен. Сброс отключает оптимизацию.", info.changed or 0, info.errors or 0)
+        if (info.errors or 0) == 0 then status.TextColor3 = C.cyan end
+    else
+        status.Text = (info.errors or 0) > 0 and "Часть настроек недоступна. Проверь графику в Roblox."
+            or "Boost выключен. Выбери опции и нажми BOOST FPS."
+    end
+end)
+
+connect(boost.Activated, function()
+    if busy or not alive then return end
+    dirty = false
+    local optionsCopy = {}
+    for key, value in pairs(selected) do optionsCopy[key] = value end
+    engine:Apply(optionsCopy)
+end)
+
+connect(reset.Activated, function()
+    if not alive then return end
+    dirty = false
+    engine:Reset()
+end)
