@@ -1536,6 +1536,15 @@ do
     end
 end
 
+-- Exact hard block: this item is never counted or accepted on either side.
+local HARD_BLOCKED_ITEMS = {
+    trikestroller = true,
+}
+
+local function isHardBlockedItem(item)
+    return HARD_BLOCKED_ITEMS[normalize(getItemName(item))] == true
+end
+
 local function variantColor(v)
     if v:find("M", 1, true) then
         return C.PURPLE
@@ -3074,13 +3083,13 @@ local Settings = {
         "ALL",
 
     myMinItemValue =
-        0.0003,
+        0.0005,
 
     theirMinItemValue =
-        0.0003,
+        0.0005,
 
     allMinItemValue =
-        0.0003,
+        0.0005,
 
     requestTimeout =
         15,
@@ -3313,13 +3322,13 @@ then
 end
 
 Settings.myMinItemValue =
-    math.max(0, tonumber(Settings.myMinItemValue) or 0.0003)
+    math.max(0.0005, tonumber(Settings.myMinItemValue) or 0.0005)
 
 Settings.theirMinItemValue =
-    math.max(0, tonumber(Settings.theirMinItemValue) or 0.0003)
+    math.max(0.0005, tonumber(Settings.theirMinItemValue) or 0.0005)
 
 Settings.allMinItemValue =
-    math.max(0, tonumber(Settings.allMinItemValue) or 0.0003)
+    math.max(0.0005, tonumber(Settings.allMinItemValue) or 0.0005)
 
 -- V11.7.10 timing migration. Existing users keep the same settings file,
 -- so force the new wait-window defaults once instead of silently loading
@@ -4096,6 +4105,12 @@ local function evaluateOffer(
         belowMin =
             0,
 
+        hardBlocked =
+            0,
+
+        hardBlockedNames =
+            {},
+
         unwantedIncomingIgnored =
             0,
 
@@ -4159,6 +4174,18 @@ local function evaluateOffer(
         result.items[
             #result.items + 1
         ] = row
+
+        if isHardBlockedItem(item) then
+            result.hardBlocked =
+                result.hardBlocked + 1
+
+            result.hardBlockedNames[
+                #result.hardBlockedNames + 1
+            ] = data.name
+
+            row.hardBlocked = true
+            continue
+        end
 
         if options.ignoreIncomingEggs == true
             and CommonPetFilter.isIgnoredIncomingEgg(item)
@@ -4874,6 +4901,10 @@ end
 
 
 local function isAllowed(name)
+
+    if HARD_BLOCKED_ITEMS[normalize(name)] then
+        return false
+    end
 
     local allowed =
         parseAllowed()
@@ -7342,21 +7373,21 @@ Connect(
 bindNumber(
     MyMinValueInput,
     "myMinItemValue",
-    0,
+    0.0005,
     1000
 )
 
 bindNumber(
     TheirMinValueInput,
     "theirMinItemValue",
-    0,
+    0.0005,
     1000
 )
 
 bindNumber(
     AllMinValueInput,
     "allMinItemValue",
-    0,
+    0.0005,
     1000
 )
 
@@ -9935,6 +9966,19 @@ local function evaluateTrade(
         profit =
             nil,
     }
+
+    if
+        mine.hardBlocked > 0
+    then
+
+        result.blocked =
+            true
+
+        result.reason =
+            "BLOCKED ITEM • TRIKE STROLLER"
+
+        return result
+    end
 
     if
         mine.unknown > 0
