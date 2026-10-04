@@ -42,7 +42,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.20"
+    "11.7.21"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -56,7 +56,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] THEIR-SIDE JUNK FILTER + OWN-SIDE COUNTING + 65S UNKNOWN BLOCK + 100S ASK-ADD"
+    "[AM V" .. VERSION .. "] PETS-ONLY VARIANT DEMAND + PROTECTED OUR 3 STAR PETS + 65S UNKNOWN + 100S ASK-ADD"
 )
 
 
@@ -1390,6 +1390,13 @@ do
         ["aztec egg"]=true, ["admin abuse egg"]=true, ["crystal egg"]=true, ["moon egg"]=true,
         ["garden egg"]=true, ["royal fairytale egg"]=true,
     }
+
+    -- Match the same normalized names used by the filter lookups.
+    for _, names in ipairs({commonNames, customUnwantedNames, ignoredIncomingEggNames}) do
+        for name, enabled in pairs(table.clone(names)) do
+            names[normalize(name)] = enabled
+        end
+    end
 
     local function rarityText(value)
         if type(value) == "string" then
@@ -2941,6 +2948,73 @@ end
 -- ANALYZE ITEM
 --============================================================
 
+--============================================================
+-- PETS-ONLY DEMAND (V11.6.2 field semantics, current AMVGG data)
+-- Observed payload labels: Low=1, Medium/Decent=2, High=3.
+-- Unknown formats never inherit AMVGG UI's permissive default of 2.
+--============================================================
+local DemandPolicy = {}
+do
+    local EXACT_DEMAND_FIELD = {
+        NP = "npRegularDemand", F = "fDemand", R = "rDemand", FR = "regularDemand",
+        N = "npNeonDemand", NF = "nfDemand", NR = "nrDemand", NFR = "neonDemand",
+        M = "npMegaDemand", MF = "mfDemand", MR = "mrDemand", MFR = "megaDemand",
+    }
+    local LABEL_STARS = {low = 1, medium = 2, decent = 2, high = 3}
+
+    local function getPetDemand(entry, variant)
+        if tonumber(entry.category) == 13 then
+            local field = EXACT_DEMAND_FIELD[variant]
+            return field and entry[field] or nil
+        end
+        -- NP means regular No Potion; its N does not mean Neon.
+        if variant == "NP" then return entry.regularDemand end
+        if variant:find("M", 1, true) then return entry.megaDemand end
+        if variant:find("N", 1, true) then return entry.neonDemand end
+        return entry.regularDemand
+    end
+
+    function DemandPolicy.normalize(raw)
+        if type(raw) == "number" then
+            if raw == 1 or raw == 2 or raw == 3 then return raw end
+        elseif type(raw) == "string" then
+            local label = raw:match("^%s*(.-)%s*$"):lower()
+            if label == "1" or label == "2" or label == "3" then
+                return tonumber(label)
+            end
+            return LABEL_STARS[label]
+        end
+        return nil
+    end
+
+    function DemandPolicy.read(entry, source, variant)
+        -- Adopt Me stores eggs in the pets inventory bucket; use AMVGG's
+        -- resolved category instead. Non-pet demand is deliberately ignored.
+        if source ~= "pets" then return false, nil, nil end
+        local raw = getPetDemand(entry, variant)
+        return true, raw, DemandPolicy.normalize(raw)
+    end
+
+    function DemandPolicy.ownAnalysisReason(analysis)
+        if analysis and analysis.isRealPet then
+            if analysis.demandStars == 3 then return "OUR 3 STAR PET PROTECTED" end
+            if analysis.demandStars == nil then return "DEMAND UNKNOWN" end
+        end
+        return nil
+    end
+
+    function DemandPolicy.credit(rawValue, analysis, itemMinimumWinPercent)
+        if analysis and analysis.isRealPet then
+            local stars = analysis.demandStars
+            if stars == 3 then return rawValue / 0.98, "3STAR" end
+            if stars == 2 then return rawValue / 1.15, "2STAR" end
+            if stars == 1 then return rawValue / 1.20, "1STAR" end
+            return nil, "DEMAND UNKNOWN"
+        end
+        return rawValue / (1 + itemMinimumWinPercent / 100), "ITEM"
+    end
+end
+
 local function analyzeItem(item)
 
     local result = {
@@ -2962,6 +3036,10 @@ local function analyzeItem(item)
 
         source =
             nil,
+
+        isRealPet = false,
+        rawDemand = nil,
+        demandStars = nil,
 
         value =
             nil,
@@ -3000,6 +3078,9 @@ local function analyzeItem(item)
 
     result.source =
         source
+
+    result.isRealPet, result.rawDemand, result.demandStars =
+        DemandPolicy.read(entry, source, result.variant)
 
     if source == "pets" then
 
@@ -3061,6 +3142,10 @@ end
 -- SETTINGS
 --============================================================
 
+function DemandPolicy.ownItemReason(item)
+    return DemandPolicy.ownAnalysisReason(analyzeItem(item))
+end
+
 local SETTINGS_FILE =
     "am_trade_v1170.json"
 
@@ -3075,6 +3160,10 @@ local Settings = {
 
     minProfitPercent =
         10,
+
+    -- Applies only to counted incoming non-pet items; pet rules are fixed.
+    itemMinimumWinPercent =
+        15,
 
     -- Minimum-value filter mode:
     -- ALL      -> ALL MIN ITEM VALUE applies to both sides.
@@ -3329,6 +3418,9 @@ Settings.theirMinItemValue =
 
 Settings.allMinItemValue =
     math.max(0.0005, tonumber(Settings.allMinItemValue) or 0.0005)
+
+Settings.itemMinimumWinPercent =
+    math.clamp(tonumber(Settings.itemMinimumWinPercent) or 15, 0, 500)
 
 -- V11.7.10 timing migration. Existing users keep the same settings file,
 -- so force the new wait-window defaults once instead of silently loading
@@ -3650,6 +3742,7 @@ end
 --============================================================
 
 local function effectiveItemValue(item)
+    local analysis = analyzeItem(item)
 
     local entry,
         source =
@@ -3695,14 +3788,12 @@ local function effectiveItemValue(item)
 
                 age =
                     age,
+
+                analysis = analysis,
             }
         end
     end
 
-    local analysis =
-        analyzeItem(
-            item
-        )
 
     if
         not analysis
@@ -3731,6 +3822,8 @@ local function effectiveItemValue(item)
                 or getItemName(
                     item
                 ),
+
+            analysis = analysis,
 
             reason =
                 analysis
@@ -4085,7 +4178,13 @@ local function evaluateOffer(
         options.ignoreBelowMin
         == true
 
+    local demandSide = options.demandSide
     local result = {
+        effectiveTotal = 0,
+        demandUnknown = 0,
+        demandUnknownNames = {},
+        protectedPets = 0,
+        protectedPetNames = {},
 
         total =
             0,
@@ -4151,6 +4250,13 @@ local function evaluateOffer(
             )
 
         local row = {
+            rawValue = data.value,
+            isRealPet = data.analysis and data.analysis.isRealPet == true or false,
+            variant = getVariant(item),
+            rawDemand = data.analysis and data.analysis.rawDemand or nil,
+            demandStars = data.analysis and data.analysis.demandStars or nil,
+            effectiveValue = 0,
+            effectiveRule = "IGNORED",
 
             raw =
                 item,
@@ -4222,6 +4328,17 @@ local function evaluateOffer(
             end
         end
 
+        if demandSide == "mine" and row.isRealPet then
+            local ownReason = DemandPolicy.ownAnalysisReason(data.analysis)
+            if ownReason == "OUR 3 STAR PET PROTECTED" then
+                result.protectedPets = result.protectedPets + 1
+                result.protectedPetNames[#result.protectedPetNames + 1] = data.name
+            elseif ownReason then
+                result.demandUnknown = result.demandUnknown + 1
+                result.demandUnknownNames[#result.demandUnknownNames + 1] = data.name
+            end
+        end
+
         local function addKnownValue()
 
             local bypassOwnMinimum =
@@ -4262,6 +4379,23 @@ local function evaluateOffer(
             result.total =
                 result.total
                 + data.value
+
+            if demandSide == "theirs" then
+                local credit, rule = DemandPolicy.credit(
+                    data.value, data.analysis, Settings.itemMinimumWinPercent
+                )
+                row.effectiveRule = rule
+                if credit == nil then
+                    result.demandUnknown = result.demandUnknown + 1
+                    result.demandUnknownNames[#result.demandUnknownNames + 1] = data.name
+                    return
+                end
+                row.effectiveValue = credit
+            else
+                row.effectiveValue = data.value
+                row.effectiveRule = "RAW"
+            end
+            result.effectiveTotal = result.effectiveTotal + row.effectiveValue
         end
 
         if data.known then
@@ -4976,6 +5110,8 @@ local function valuedInventory()
                 Settings.autoTrade
                 and data.estimated
             )
+            and DemandPolicy.ownAnalysisReason(data.analysis) == nil
+
             and isAllowed(
                 data.name
             )
@@ -5050,21 +5186,10 @@ end
 --============================================================
 
 local function optimizeOurOffer(
-    theirValue
+    theirEffectiveTotal
 )
-
-    local target =
-        tonumber(
-            Settings.minProfitPercent
-        )
-        or 10
-
-    local cap =
-        theirValue
-        / (
-            1
-            + target / 100
-        )
+    -- Per-item demand/item rules already include the required win.
+    local cap = tonumber(theirEffectiveTotal) or 0
 
     if cap <= 0 then
 
@@ -5341,6 +5466,17 @@ local function addOurItem(uid)
         return false
     end
 
+    local found = false
+    for _, item in ipairs(inventoryItems()) do
+        if tostring(itemUID(item)) == tostring(uid) then
+            local reason = DemandPolicy.ownItemReason(item)
+            if reason then return false, reason end
+            found = true
+            break
+        end
+    end
+    if not found then return false, "ITEM NO LONGER IN INVENTORY" end
+
     return
         remoteCall(
             TradeRemote.Add,
@@ -5444,6 +5580,15 @@ local function rebuildOurOffer(
         return false, "THEIR_CHANGED"
     end
 
+    for _, item in pairs(getOfferItems(myOffer)) do
+        local reason = DemandPolicy.ownItemReason(item)
+        if reason then return false, reason end
+    end
+    for _, candidate in ipairs(desired) do
+        local reason = DemandPolicy.ownItemReason(candidate.item)
+        if reason then return false, reason end
+    end
+
     local current =
         currentUIDSet(
             myOffer
@@ -5504,6 +5649,8 @@ local function rebuildOurOffer(
                     return false, "THEIR_CHANGED"
                 end
 
+                local ownReason = DemandPolicy.ownItemReason(item)
+                if ownReason then return false, ownReason end
                 removeOurItem(
                     uid
                 )
@@ -5552,9 +5699,8 @@ local function rebuildOurOffer(
                 return false, "THEIR_CHANGED"
             end
 
-            addOurItem(
-                candidate.uid
-            )
+            local added, addReason = addOurItem(candidate.uid)
+            if not added then return false, addReason or "ADD FAILED" end
 
             if not theirOfferStillCurrent() then
                 return false, "THEIR_CHANGED"
@@ -7043,7 +7189,7 @@ local RefreshMinutesInput =
 
 local ProfitInput =
     settingInput(
-        "MIN PROFIT %",
+        "MIN PROFIT % (MANUAL)",
         Settings.minProfitPercent,
         202
     )
@@ -7805,6 +7951,13 @@ Connect(
 
 renderUnwantedIncoming()
 
+
+do
+    local ItemMinimumWinInput = settingInput(
+        "ITEM MINIMUM WIN %", Settings.itemMinimumWinPercent, 1506
+    )
+    bindNumber(ItemMinimumWinInput, "itemMinimumWinPercent", 0, 500)
+end
 
 local function setTestStatus(
     text,
@@ -9905,6 +10058,8 @@ local function evaluateTrade(
         evaluateOffer(
             myOffer,
             {
+                demandSide = Settings.autoTrade and "mine" or nil,
+
                 allowEstimated =
                     Settings.allowEstimatedOwnPets
                     == true,
@@ -9928,6 +10083,8 @@ local function evaluateTrade(
         evaluateOffer(
             theirOffer,
             {
+                demandSide = Settings.autoTrade and "theirs" or nil,
+
                 minValue =
                     activeMinItemValue("theirs"),
 
@@ -9980,6 +10137,12 @@ local function evaluateTrade(
         return result
     end
 
+    if Settings.autoTrade and mine.protectedPets > 0 then
+        result.blocked = true
+        result.reason = "OUR 3 STAR PET PROTECTED"
+        return result
+    end
+
     if
         mine.unknown > 0
         or theirs.unknown > 0
@@ -9991,6 +10154,12 @@ local function evaluateTrade(
         result.reason =
             "UNKNOWN"
 
+        return result
+    end
+
+    if Settings.autoTrade and (mine.demandUnknown > 0 or theirs.demandUnknown > 0) then
+        result.blocked = true
+        result.reason = "DEMAND UNKNOWN"
         return result
     end
 
@@ -10058,7 +10227,10 @@ local function evaluateTrade(
             theirs.total
         )
 
-    if result.profit then
+    if Settings.autoTrade then
+        result.valid = mine.total > 0
+            and mine.total <= theirs.effectiveTotal + 0.000000001
+    elseif result.profit then
 
         result.valid =
 
@@ -10299,7 +10471,7 @@ local function secureAccept(
                 valueText(
                     requiredDelay
                 ),
-                "SEC +",
+                "SEC • RAW",
                 string.format(
                     "%.2f%%",
                     final.profit
@@ -10321,7 +10493,7 @@ local function secureAccept(
     then
 
         testLog(
-            "FIRST ACCEPT +",
+            "FIRST ACCEPT • RAW",
             string.format(
                 "%.2f%%",
                 evaluation.profit
@@ -10600,6 +10772,12 @@ local function manageAutoTrade(trade)
         offerSignature(
             theirOffer
         )
+
+    -- Demand/value refreshes and ITEM MINIMUM WIN changes also invalidate
+    -- the optimizer target even when the player's item signature is stable.
+    local optimizationSignature = theirSignature
+        .. "|AMVGG=" .. tostring(AMVGG.version)
+        .. "|ITEMWIN=" .. tostring(Settings.itemMinimumWinPercent)
 
     local signature =
         ourSignature
@@ -10897,7 +11075,7 @@ local function manageAutoTrade(trade)
 
         -- UNKNOWN gets a dedicated wait window instead of blocking forever.
         -- Any partner add/remove resets this timer through theirSignature.
-        if tostring(evaluation.reason) == "UNKNOWN" then
+        if evaluation.reason == "UNKNOWN" or evaluation.reason == "DEMAND UNKNOWN" then
 
             if
                 not State.unknownStarted
@@ -10912,7 +11090,7 @@ local function manageAutoTrade(trade)
                     theirSignature
 
                 testLog(
-                    "BLOCK UNKNOWN",
+                    "BLOCK " .. evaluation.reason,
                     "WAIT",
                     Settings.unknownBlockTimeout,
                     "SECONDS FOR PARTNER CHANGE"
@@ -10933,7 +11111,7 @@ local function manageAutoTrade(trade)
                 )
 
             setTestStatus(
-                "BLOCK UNKNOWN "
+                "BLOCK " .. evaluation.reason .. " "
                 .. unknownRemaining
                 .. "s",
                 C.RED
@@ -10949,7 +11127,7 @@ local function manageAutoTrade(trade)
                     true
 
                 testLog(
-                    "BLOCK UNKNOWN TIMEOUT -> DECLINE"
+                    "BLOCK " .. evaluation.reason .. " TIMEOUT -> DECLINE"
                 )
 
                 decline()
@@ -11151,17 +11329,17 @@ local function manageAutoTrade(trade)
 
     -- ALWAYS OPTIMIZE OUR SIDE BEFORE ACCEPT
     -- Their offer stays fixed; choose the most valuable combination
-    -- from our inventory that still keeps MIN PROFIT.
+    -- from our inventory that fits the per-item effective demand cap.
     if
         State.optimizedSignature
-        ~= theirSignature
+        ~= optimizationSignature
     then
 
         local desired,
             ourValue,
             cap =
             optimizeOurOffer(
-                evaluation.theirs.total
+                evaluation.theirs.effectiveTotal
             )
 
         if
@@ -11170,7 +11348,7 @@ local function manageAutoTrade(trade)
         then
 
             testLog(
-                "BALANCE TO MIN PROFIT",
+                "BALANCE TO DEMAND CAP",
                 "THEM=",
                 valueText(
                     evaluation.theirs.total
@@ -11183,14 +11361,7 @@ local function manageAutoTrade(trade)
                 valueText(
                     ourValue
                 ),
-                "TARGET=+"
-                .. valueText(
-                    tonumber(
-                        Settings.minProfitPercent
-                    )
-                    or 10
-                )
-                .. "%"
+                "RULES=PER ITEM"
             )
 
             for index,
@@ -11257,7 +11428,7 @@ local function manageAutoTrade(trade)
 
             -- Mark this exact partner offer as successfully balanced.
             State.optimizedSignature =
-                theirSignature
+                optimizationSignature
 
             State.acceptReadySignature =
                 nil
@@ -11275,7 +11446,7 @@ local function manageAutoTrade(trade)
         -- Remember this partner signature so we do not recalculate it
         -- every frame; a new item from them clears it automatically.
         State.optimizedSignature =
-            theirSignature
+            optimizationSignature
     end
 
     -- ACCEPT ONLY AFTER OUR OFFER WAS BALANCED
@@ -11335,7 +11506,7 @@ local function manageAutoTrade(trade)
 
             setTestStatus(
                 string.format(
-                    "WIN +%.2f%% • ACCEPT IN %.1fs",
+                    "DEMAND OK • RAW %.2f%% • ACCEPT IN %.1fs",
                     evaluation.profit,
                     remaining
                 ),
@@ -11376,7 +11547,7 @@ local function manageAutoTrade(trade)
 
         setTestStatus(
             string.format(
-                "WIN +%.2f%%",
+                "DEMAND OK • RAW %.2f%%",
                 finalCheck.profit
             ),
             C.GREEN
