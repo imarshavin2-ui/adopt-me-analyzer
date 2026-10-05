@@ -42,7 +42,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.22"
+    "11.7.26"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -85,7 +85,71 @@ end
 -- REMOVE OLD GUI
 --============================================================
 
+local Runtime = {active = true, jobs = {}, connections = {}, cleanups = {}}
+do
+    local nativeTask = task
+    local key = "__AM_ANALYZER_RUNTIME"
+    local previous = ENV[key]
+    if type(previous) == "table" and type(previous.stop) == "function" then
+        pcall(previous.stop, "replaced by a new analyzer")
+    end
+    ENV[key] = Runtime
+    function Runtime.alive()
+        return Runtime.active and ENV[key] == Runtime
+    end
+    function Runtime.stop(reason)
+        if not Runtime.active then return end
+        Runtime.active = false
+        if Runtime.flow then pcall(Runtime.flow.stop, reason or "stopped") end
+        for _, connection in ipairs(Runtime.connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(Runtime.connections)
+        for _, cleanup in ipairs(Runtime.cleanups) do pcall(cleanup) end
+        table.clear(Runtime.cleanups)
+        for thread in pairs(Runtime.jobs) do
+            if thread ~= coroutine.running() and coroutine.status(thread) ~= "dead" then
+                pcall(nativeTask.cancel, thread)
+            end
+        end
+        table.clear(Runtime.jobs)
+        for _, object in pairs({Runtime.gui, Runtime.boot}) do
+            if object then pcall(function() object:Destroy() end) end
+        end
+        if ENV[key] == Runtime then ENV[key] = nil end
+    end
+    function Runtime.connect(signal, callback)
+        local connection = signal:Connect(function(...)
+            if Runtime.alive() then return callback(...) end
+        end)
+        Runtime.connections[#Runtime.connections + 1] = connection
+        return connection
+    end
+    local function launch(method, delay, fn, ...)
+        local args = table.pack(...)
+        local function run()
+            if Runtime.alive() then fn(table.unpack(args, 1, args.n)) end
+            Runtime.jobs[coroutine.running()] = nil
+        end
+        local thread
+        if delay ~= nil then thread = nativeTask.delay(delay, run)
+        else thread = nativeTask[method](run) end
+        if type(thread) == "thread" and coroutine.status(thread) ~= "dead" then
+            Runtime.jobs[thread] = true
+        end
+        return thread
+    end
+    Runtime.task = setmetatable({
+        spawn = function(fn, ...) return launch("spawn", nil, fn, ...) end,
+        defer = function(fn, ...) return launch("defer", nil, fn, ...) end,
+        delay = function(seconds, fn, ...) return launch("delay", seconds, fn, ...) end,
+    }, {__index = nativeTask})
+end
+
+
 local OLD_GUI_NAMES = {
+    GUI_NAME,
+    BOOT_NAME,
 
     "AdoptMeTradeAnalyzerV11",
     "AdoptMeTradeAnalyzerV111",
@@ -145,20 +209,9 @@ local OLD_GUI_NAMES = {
 }
 
 
-for _,
-    name in ipairs(
-        OLD_GUI_NAMES
-    )
-do
-
-    local object =
-        GuiParent:
-        FindFirstChild(
-            name
-        )
-
-    if object then
-        object:Destroy()
+for _, parent in ipairs({GuiParent, PlayerGui}) do
+    for _, object in ipairs(parent:GetChildren()) do
+        if table.find(OLD_GUI_NAMES, object.Name) then object:Destroy() end
     end
 end
 
@@ -836,6 +889,7 @@ BootGui.DisplayOrder =
 
 BootGui.Parent =
     GuiParent
+Runtime.boot = BootGui
 
 
 local BootFrame =
@@ -1445,7 +1499,8 @@ do
             p.rarityName,
         }
 
-        for _, value in ipairs(candidates) do
+        for index = 1, 10 do
+            local value = candidates[index]
             local rarity = rarityText(value)
 
             if rarity == "common" then
@@ -1959,7 +2014,7 @@ local function parseBody(body)
             == 0
         then
 
-            task.wait()
+            Runtime.task.wait()
         end
     end
 
@@ -2117,7 +2172,7 @@ local function loadCategory(slug)
             end
         end
 
-        task.wait(
+        Runtime.task.wait(
             0.12
         )
     end
@@ -2130,111 +2185,39 @@ end
 
 
 local function refresh()
-
-    if AMVGG.loading then
-        return false
-    end
-
-    AMVGG.loading =
-        true
-
-    AMVGG.error =
-        nil
-
-    local nextCategories =
-        {}
-
-    local nextCounts =
-        {}
-
-    local total =
-        0
-
-    local failed =
-        {}
-
-    for _,
-        slug in ipairs(
-            CATEGORY_URLS
-        )
-    do
-
-        local database,
-            count,
-            status =
-            loadCategory(
-                slug
-            )
-
-        nextCategories[slug] =
-            database
-
-        nextCounts[slug] =
-            count
-
-        total =
-            total
-            + count
-
-        if count <= 0 then
-
-            failed[
-                #failed + 1
-            ] =
-                slug
-                .. "("
-                .. tostring(
-                    status
-                )
-                .. ")"
+    if AMVGG.loading or not Runtime.alive() then return false end
+    AMVGG.loading = true
+    local ok, snapshot, failure = pcall(function()
+        local categories, counts, total, failed = {}, {}, 0, {}
+        for _, slug in ipairs(CATEGORY_URLS) do
+            local database, count, status = loadCategory(slug)
+            if not Runtime.alive() then return nil, "SESSION STOPPED" end
+            if type(database) ~= "table" or type(count) ~= "number" or count <= 0 then
+                failed[#failed + 1] = slug .. "(" .. tostring(status) .. ")"
+            else
+                categories[slug], counts[slug] = database, count
+                total += count
+            end
+            Runtime.task.wait()
         end
-
-        task.wait()
-    end
-
-    if total <= 0 then
-
-        AMVGG.loading =
-            false
-
-        AMVGG.error =
-            "NO AMVGG DATA"
-
+        -- Commit a complete snapshot atomically. A partial update must not
+        -- erase good categories or mix price generations in one decision.
+        if #failed > 0 or total <= 0 then
+            return nil, "REFRESH FAILED: " .. table.concat(failed, ", ")
+        end
+        return {categories = categories, counts = counts, total = total}
+    end)
+    AMVGG.loading = false
+    if not Runtime.alive() then return false end
+    if not ok or not snapshot then
+        AMVGG.error = tostring(ok and failure or snapshot)
+        AMVGG.dataStale = true
         return false
     end
-
-    AMVGG.categories =
-        nextCategories
-
-    AMVGG.counts =
-        nextCounts
-
-    AMVGG.total =
-        total
-
-    AMVGG.ready =
-        true
-
-    AMVGG.loading =
-        false
-
-    AMVGG.version =
-        AMVGG.version
-        + 1
-
-    AMVGG.lastRefresh =
-        os.time()
-
-    if #failed > 0 then
-
-        AMVGG.error =
-            "PARTIAL: "
-            .. table.concat(
-                failed,
-                ", "
-            )
-    end
-
+    AMVGG.categories, AMVGG.counts, AMVGG.total = snapshot.categories, snapshot.counts, snapshot.total
+    AMVGG.ready, AMVGG.dataStale, AMVGG.error = true, false, nil
+    AMVGG.version += 1
+    AMVGG.lastRefresh = os.time()
     return true
 end
 
@@ -2423,30 +2406,14 @@ do
                 findAMVGG(item)
 
             if type(entry) == "table" and source == "pets" then
-                local rarity =
-                    entry.rarity
-                    or entry.pet_rarity
-                    or entry.petRarity
-                    or entry.rarity_name
-                    or entry.rarityName
-
-                if type(rarity) == "table" then
-                    rarity =
-                        rarity.name
-                        or rarity.Name
-                        or rarity.value
-                        or rarity.Value
-                end
-
-                if type(rarity) == "string" then
-                    local lowered = rarity:lower()
-
-                    if lowered == "common" then
-                        return true
-                    end
-
-                    if lowered ~= "" and lowered ~= "unknown" then
-                        return false
+                local candidates = {entry.rarity, entry.pet_rarity, entry.petRarity, entry.rarity_name, entry.rarityName}
+                local recognized = {common=true, uncommon=true, rare=true, ultrarare=true, legendary=true}
+                for index = 1, 5 do
+                    local rarity = candidates[index]
+                    if type(rarity) == "table" then rarity = rarity.name or rarity.Name or rarity.value or rarity.Value end
+                    if type(rarity) == "string" then
+                        local key = normalize(rarity)
+                        if recognized[key] then return key == "common" end
                     end
                 end
             end
@@ -2890,7 +2857,7 @@ local function getPetValue(
             value,
             field,
             false,
-            value ~= nil and nil or "CATEGORY 13 FIELD NIL"
+            value == nil and "CATEGORY 13 FIELD NIL" or nil
     end
 
     if not category then
@@ -2918,7 +2885,7 @@ local function getPetValue(
         value,
         "CALC/CAT=" .. tostring(category),
         false,
-        value ~= nil and nil or "CALCULATED NIL"
+        value == nil and "CALCULATED NIL" or nil
 end
 
 
@@ -3503,6 +3470,20 @@ else
 end
 
 
+local AutoTradeGeneration = 0
+local Gui
+
+function Runtime.incomingItemIgnoreReason(item, options)
+    if (not options or options.ignoreIncomingEggs == true) and CommonPetFilter.isIgnoredIncomingEgg(item) then
+        return "IGNORED EGG"
+    end
+    if Settings.excludeUnwantedIncomingNoPotion and (not options or options.ignoreUnwantedIncomingNoPotion == true) then
+        local ignored, reason = CommonPetFilter.shouldIgnoreIncoming(item)
+        if ignored then return reason end
+    end
+    return nil
+end
+
 local function activeMinItemValue(side)
 
     if Settings.minValueMode == "ALL" then
@@ -3544,6 +3525,28 @@ end
 --============================================================
 -- FIRST SEEN DATABASE
 --============================================================
+
+function Runtime.policySignature()
+    local keys = {
+        "allowedItems", "minValueMode", "allMinItemValue", "myMinItemValue", "theirMinItemValue",
+        "itemMinimumWinPercent", "newItemHours", "blockEstimated", "allowEstimatedOwnPets",
+        "excludeUnwantedIncomingNoPotion", "minProfitPercent", "maxOurItems", "optimizerBeam",
+    }
+    local values = {}
+    for _, key in ipairs(keys) do values[#values + 1] = key .. "=" .. tostring(Settings[key]) end
+    return table.concat(values, "|")
+end
+
+function Runtime.disableAutomation()
+    AutoTradeGeneration += 1
+    if Runtime.flow then Runtime.flow.stop("Auto Trade disabled") end
+    local state = Runtime.state
+    if state then
+        state.optimizedSignature, state.acceptReadySignature, state.acceptReadySince = nil, nil, nil
+        state.policySignature = nil
+    end
+end
+
 
 local FirstSeen =
     loadJSON(
@@ -3934,6 +3937,12 @@ end
 -- TRADE DATA
 --============================================================
 
+function Runtime.tradeInConfirmation(trade)
+    if type(trade) ~= "table" then return false end
+    local stage = tostring(trade.current_stage or trade.stage or trade.state or ""):lower()
+    return trade.confirming == true or trade.confirmation_started == true or stage:find("confirm", 1, true) ~= nil
+end
+
 local function getTrade()
 
     local keys = {
@@ -4156,6 +4165,56 @@ end
 -- EVALUATE OFFER
 --============================================================
 
+function Runtime.partnerKey(partner)
+    if typeof(partner) == "Instance" then return "id:" .. tostring(partner.UserId) end
+    if type(partner) == "number" then return "id:" .. tostring(partner) end
+    if type(partner) == "table" then
+        local id = partner.user_id or partner.userId or partner.UserId or partner.id
+        if id ~= nil then return "id:" .. tostring(id) end
+    end
+    return "name:" .. playerName(partner):lower()
+end
+
+function Runtime.tradeKey(trade, partner)
+    return tostring(trade.trade_id or trade.id or playerName(partner)) .. ":" .. Runtime.partnerKey(partner)
+end
+
+function Runtime.captureTrade(trade)
+    local live = getTrade()
+    local mine, theirs, _, partner = getTradeSides(live)
+    local suppliedMine, suppliedTheirs, _, suppliedPartner = getTradeSides(trade)
+    if not mine or not theirs or not suppliedMine or not suppliedTheirs
+        or Runtime.tradeKey(live, partner) ~= Runtime.tradeKey(trade, suppliedPartner)
+        or fullSignature(mine, theirs) ~= fullSignature(suppliedMine, suppliedTheirs) then return nil end
+    return {
+        key = Runtime.tradeKey(live, partner), generation = AutoTradeGeneration, auto = Settings.autoTrade,
+        prices = AMVGG.version, policy = Runtime.policySignature(),
+        mine = offerSignature(mine), theirs = offerSignature(theirs),
+    }
+end
+
+function Runtime.liveContext(context, checkMine, checkPrices)
+    if not context then return nil, "TRADE_CHANGED" end
+    if not Runtime.alive() or not Gui.Parent then return nil, "GUI_CLOSED" end
+    if AutoTradeGeneration ~= context.generation or Settings.autoTrade ~= context.auto then return nil, "AUTO_DISABLED" end
+    local live = getTrade()
+    local mine, theirs, _, partner = getTradeSides(live)
+    if not mine or not theirs or Runtime.tradeKey(live, partner) ~= context.key then return nil, "TRADE_CHANGED" end
+    if offerSignature(theirs) ~= context.theirs then return nil, "THEIR_CHANGED" end
+    if checkMine and offerSignature(mine) ~= context.mine then return nil, "OUR_CHANGED" end
+    if checkPrices then
+        if AMVGG.dataStale or AMVGG.loading or not AMVGG.ready then return nil, "PRICES_UNAVAILABLE" end
+        if AMVGG.version ~= context.prices then return nil, "PRICES_CHANGED" end
+        if Runtime.policySignature() ~= context.policy then return nil, "POLICY_CHANGED" end
+    end
+    return live, nil, mine, theirs
+end
+
+function Runtime.optimizationKey(theirOffer)
+    return offerSignature(theirOffer) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|POLICY=" .. Runtime.policySignature()
+end
+
+
 local function evaluateOffer(
     offer,
     options
@@ -4296,39 +4355,12 @@ local function evaluateOffer(
             continue
         end
 
-        if options.ignoreIncomingEggs == true
-            and CommonPetFilter.isIgnoredIncomingEgg(item)
-        then
-            result.unwantedIncomingIgnored = result.unwantedIncomingIgnored + 1
+        local incomingReason = Runtime.incomingItemIgnoreReason(item, options)
+        if incomingReason then
+            result.unwantedIncomingIgnored += 1
             result.unwantedIncomingNames[#result.unwantedIncomingNames + 1] = data.name
-            row.ignoredIncomingUnwanted = true
-            row.ignoredIncomingReason = "IGNORED EGG"
+            row.ignoredIncomingUnwanted, row.ignoredIncomingReason = true, incomingReason
             continue
-        end
-
-        if
-            Settings.excludeUnwantedIncomingNoPotion
-            and options.ignoreUnwantedIncomingNoPotion == true
-        then
-            local shouldIgnore, ignoreReason =
-                CommonPetFilter.shouldIgnoreIncoming(
-                    item
-                )
-
-            if shouldIgnore then
-                result.unwantedIncomingIgnored =
-                    result.unwantedIncomingIgnored
-                    + 1
-
-                result.unwantedIncomingNames[
-                    #result.unwantedIncomingNames + 1
-                ] =
-                    data.name
-
-                row.ignoredIncomingUnwanted = true
-                row.ignoredIncomingReason = ignoreReason
-                continue
-            end
         end
 
         if demandSide == "mine" and row.isRealPet then
@@ -4707,6 +4739,8 @@ TradeRemote.SuggestRemoveName =
         "TradeAPI/SuggestRemoveItem",
     })
 
+
+TradeRemote.QuickChat, TradeRemote.QuickChatName = resolveRemote({"TradeAPI/SendQuickChat"})
 
 local function remoteCall(
     remote,
@@ -5193,6 +5227,8 @@ local function optimizeOurOffer(
 )
     -- Per-item demand/item rules already include the required win.
     local cap = tonumber(theirEffectiveTotal) or 0
+    local operationContext = Runtime.captureTrade(getTrade())
+    local initialPrices, initialPolicy, initialGeneration = AMVGG.version, Runtime.policySignature(), AutoTradeGeneration
 
     if cap <= 0 then
 
@@ -5235,16 +5271,24 @@ local function optimizeOurOffer(
     end
 
     if #candidates > 140 then
-
-        local cut =
-            {}
-
-        for i = 1, 140 do
-            cut[i] = candidates[i]
+        -- Keep useful multiplicity of equal prices and preserve cheap fillers.
+        -- This remains bounded beam search, not a promise of a global optimum.
+        local perPrice, diverse = {}, {}
+        local multiplicity = math.clamp(math.floor(tonumber(Settings.maxOurItems) or 18), 1, 18)
+        for _, candidate in ipairs(candidates) do
+            local key = string.format("%.7f:%s", candidate.value, tostring(candidate.isPet))
+            local count = perPrice[key] or 0
+            if count < multiplicity then diverse[#diverse + 1] = candidate perPrice[key] = count + 1 end
         end
-
-        candidates =
-            cut
+        if #diverse > 280 then
+            local selected, indices = {}, {}
+            local function keep(index) if not indices[index] then indices[index] = true end end
+            for index = 1, 70 do keep(index) keep(#diverse - index + 1) end
+            for index = 0, 139 do keep(1 + math.floor(index * (#diverse - 1) / 139)) end
+            for index, candidate in ipairs(diverse) do if indices[index] then selected[#selected + 1] = candidate end end
+            diverse = selected
+        end
+        candidates = diverse
     end
 
     local beam = {
@@ -5284,12 +5328,20 @@ local function optimizeOurOffer(
             18
         )
 
-    for _,
+    for candidateIndex,
         candidate in ipairs(
             candidates
         )
     do
 
+        if candidateIndex % 16 == 0 then
+            Runtime.task.wait()
+            if AMVGG.loading or AMVGG.dataStale or AMVGG.version ~= initialPrices
+                or Runtime.policySignature() ~= initialPolicy or AutoTradeGeneration ~= initialGeneration
+                or (operationContext and not Runtime.liveContext(operationContext, true, true)) then
+                return {}, 0, cap, "OPTIMIZATION CONTEXT CHANGED"
+            end
+        end
         local expanded =
             {}
 
@@ -5469,9 +5521,16 @@ local function addOurItem(uid)
         return false
     end
 
+    local context = Runtime.captureTrade(getTrade())
+    local live = Runtime.liveContext(context, true, true)
+    if not live or Runtime.tradeInConfirmation(live) then return false, "TRADE_CHANGED" end
     local found = false
     for _, item in ipairs(inventoryItems()) do
         if tostring(itemUID(item)) == tostring(uid) then
+            local data = effectiveItemValue(item)
+            if not isAllowed(data.name) then return false, "OUR ITEM NOT ALLOWED" end
+            if not data.known or data.newIgnored or data.estimated or data.value <= 0 then return false, "EXACT SAFE VALUE REQUIRED" end
+            if data.value < activeMinItemValue("mine") and not CommonPetFilter.shouldBypassOurMinimum(item) then return false, "OUR ITEM < MIN VALUE" end
             local reason = DemandPolicy.ownItemReason(item)
             if reason then return false, reason end
             found = true
@@ -5480,6 +5539,7 @@ local function addOurItem(uid)
     end
     if not found then return false, "ITEM NO LONGER IN INVENTORY" end
 
+    if not Runtime.liveContext(context, true, true) then return false, "TRADE_CHANGED" end
     return
         remoteCall(
             TradeRemote.Add,
@@ -5535,198 +5595,109 @@ local function currentUIDSet(offer)
 end
 
 
-local function rebuildOurOffer(
-    myOffer,
-    desired,
-    expectedTheirSignature
-)
-
-    -- The other player can add/remove/replace units while we are
-    -- rebuilding our side. Never finish a stale build.
-    local function liveTheirSignature()
-
-        local trade =
-            getTrade()
-
-        if not trade then
-            return nil
+local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
+    local function partnerKey(partner)
+        if typeof(partner) == "Instance" then
+            return "id:" .. tostring(partner.UserId)
         end
-
-        local _,
-            currentTheirOffer =
-            getTradeSides(
-                trade
-            )
-
-        if not currentTheirOffer then
-            return nil
+        if type(partner) == "number" then return "id:" .. tostring(partner) end
+        if type(partner) == "table" then
+            local id = partner.user_id or partner.userId or partner.id
+            if id ~= nil then return "id:" .. tostring(id) end
         end
-
-        return
-            offerSignature(
-                currentTheirOffer
-            )
+        return "name:" .. playerName(partner):lower()
     end
 
-    local function theirOfferStillCurrent()
+    local initial = getTrade()
+    local initialMine, initialTheirs, _, initialPartner = getTradeSides(initial)
+    if not initialMine or not initialTheirs or not initialPartner then
+        return false, "TRADE_CHANGED"
+    end
+    local initialID = tostring(initial.trade_id or initial.id or playerName(initialPartner))
+    local initialPartnerKey = partnerKey(initialPartner)
+    local initialGeneration = AutoTradeGeneration
+    local initialPrices, initialPolicy = AMVGG.version, Runtime.policySignature()
 
-        if expectedTheirSignature == nil then
-            return true
+    -- Check the operation's trade context after every yield, including remote
+    -- replies. An identical incoming offer in another trade is not this build.
+    local function contextReason()
+        if not Settings.autoTrade or initialGeneration ~= AutoTradeGeneration then
+            return "AUTO_DISABLED"
         end
-
-        return
-            liveTheirSignature()
-            == expectedTheirSignature
+        if not Gui.Parent or not Runtime.alive() then return "GUI_CLOSED" end
+        if AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then return "PRICES_UNAVAILABLE" end
+        if AMVGG.version ~= initialPrices then return "PRICES_CHANGED" end
+        if Runtime.policySignature() ~= initialPolicy then return "POLICY_CHANGED" end
+        local live = getTrade()
+        local mine, theirs, _, partner = getTradeSides(live)
+        if not mine or not theirs or not partner
+            or tostring(live.trade_id or live.id or playerName(partner)) ~= initialID
+            or partnerKey(partner) ~= initialPartnerKey then
+            return "TRADE_CHANGED"
+        end
+        local stage = tostring(live.current_stage or live.stage or live.state or ""):lower()
+        if live.confirmation_started == true or live.confirming == true
+            or stage:find("confirm", 1, true) then
+            return "TRADE_CONFIRMING"
+        end
+        if expectedTheirSignature ~= nil and offerSignature(theirs) ~= expectedTheirSignature then
+            return "THEIR_CHANGED"
+        end
+        return nil
     end
 
-    if not theirOfferStillCurrent() then
-        return false, "THEIR_CHANGED"
-    end
-
+    local reason = contextReason()
+    if reason then return false, reason end
     for _, item in pairs(getOfferItems(myOffer)) do
-        local reason = DemandPolicy.ownItemReason(item)
+        reason = DemandPolicy.ownItemReason(item)
         if reason then return false, reason end
     end
     for _, candidate in ipairs(desired) do
-        local reason = DemandPolicy.ownItemReason(candidate.item)
+        if not isAllowed(effectiveItemValue(candidate.item).name) then return false, "OUR ITEM NOT ALLOWED" end
+        reason = DemandPolicy.ownItemReason(candidate.item)
         if reason then return false, reason end
     end
 
-    local current =
-        currentUIDSet(
-            myOffer
-        )
+    local current, wanted = currentUIDSet(myOffer), {}
+    for _, candidate in ipairs(desired) do wanted[candidate.uid] = true end
+    local actionDelay = math.max(0.1, tonumber(Settings.itemActionDelay) or 0.85)
+    local settleDelay = math.max(0.25, tonumber(Settings.postRebuildDelay) or 1.25)
 
-    local wanted =
-        {}
-
-    for _,
-        candidate in ipairs(
-            desired
-        )
-    do
-
-        wanted[
-            candidate.uid
-        ] =
-            true
-    end
-
-    local actionDelay =
-        math.max(
-            0.1,
-            tonumber(
-                Settings.itemActionDelay
-            )
-            or 0.85
-        )
-
-    -- Remove slowly first.
-    for _,
-        item in pairs(
-            getOfferItems(
-                myOffer
-            )
-        )
-    do
-
-        local uid =
-            itemUID(
-                item
-            )
-
-        if uid then
-
-            uid =
-                tostring(
-                    uid
-                )
-
-            if not wanted[uid] then
-
-                task.wait(
-                    actionDelay
-                )
-
-                if not theirOfferStillCurrent() then
-                    return false, "THEIR_CHANGED"
-                end
-
-                local ownReason = DemandPolicy.ownItemReason(item)
-                if ownReason then return false, ownReason end
-                removeOurItem(
-                    uid
-                )
-
-                if not theirOfferStillCurrent() then
-                    return false, "THEIR_CHANGED"
-                end
-            end
+    for _, item in pairs(getOfferItems(myOffer)) do
+        local uid = itemUID(item)
+        if uid ~= nil and not wanted[tostring(uid)] then
+            Runtime.task.wait(actionDelay)
+            reason = contextReason()
+            if reason then return false, reason end
+            reason = DemandPolicy.ownItemReason(item)
+            if reason then return false, reason end
+            local ok, result = removeOurItem(tostring(uid))
+            reason = contextReason()
+            if reason then return false, reason end
+            if not ok or result == false then return false, "REMOVE FAILED" end
         end
     end
 
-    -- Let the client receive removals before additions.
-    task.wait(
-        math.max(
-            0.25,
-            tonumber(
-                Settings.postRebuildDelay
-            )
-            or 1.25
-        )
-        * 0.5
-    )
-
-    if not theirOfferStillCurrent() then
-        return false, "THEIR_CHANGED"
-    end
-
-    -- Add every selected unit one by one, with a visible delay.
-    for _,
-        candidate in ipairs(
-            desired
-        )
-    do
-
-        if
-            not current[
-                candidate.uid
-            ]
-        then
-
-            task.wait(
-                actionDelay
-            )
-
-            if not theirOfferStillCurrent() then
-                return false, "THEIR_CHANGED"
-            end
-
-            local added, addReason = addOurItem(candidate.uid)
-            if not added then return false, addReason or "ADD FAILED" end
-
-            if not theirOfferStillCurrent() then
-                return false, "THEIR_CHANGED"
-            end
+    Runtime.task.wait(settleDelay * 0.5)
+    reason = contextReason()
+    if reason then return false, reason end
+    for _, candidate in ipairs(desired) do
+        if not current[candidate.uid] then
+            Runtime.task.wait(actionDelay)
+            reason = contextReason()
+            if reason then return false, reason end
+            local added, result = addOurItem(candidate.uid)
+            reason = contextReason()
+            if reason then return false, reason end
+            if not added or result == false then return false, result or "ADD FAILED" end
         end
     end
-
-    task.wait(
-        math.max(
-            0.25,
-            tonumber(
-                Settings.postRebuildDelay
-            )
-            or 1.25
-        )
-    )
-
-    if not theirOfferStillCurrent() then
-        return false, "THEIR_CHANGED"
-    end
-
+    Runtime.task.wait(settleDelay)
+    reason = contextReason()
+    if reason then return false, reason end
     return true, nil
 end
+
 
 --============================================================
 -- CHAT
@@ -5784,7 +5755,7 @@ setBoot(
 )
 
 
-local Gui =
+Gui =
     Instance.new(
         "ScreenGui"
     )
@@ -5800,6 +5771,8 @@ Gui.DisplayOrder =
 
 Gui.Parent =
     GuiParent
+Runtime.gui = Gui
+Runtime.connect(Gui.Destroying, function() Runtime.stop("GUI destroyed") end)
 
 
 local Main =
@@ -5967,8 +5940,7 @@ local dragStart
 local dragOrigin
 
 
-Top.InputBegan:
-Connect(
+Runtime.connect(Top.InputBegan,
     function(input)
 
         if
@@ -5992,8 +5964,7 @@ Connect(
 )
 
 
-UIS.InputChanged:
-Connect(
+Runtime.connect(UIS.InputChanged,
     function(input)
 
         if not dragging then
@@ -6068,8 +6039,7 @@ Connect(
 )
 
 
-UIS.InputEnded:
-Connect(
+Runtime.connect(UIS.InputEnded,
     function(input)
 
         if
@@ -6284,8 +6254,7 @@ local function nav(
     value.TextColor3 =
         C.MUTED
 
-    value.Activated:
-    Connect(
+    Runtime.connect(value.Activated,
         function()
 
             setPage(
@@ -6631,14 +6600,10 @@ local function rebuildSearch()
 end
 
 
-SearchBox:
-GetPropertyChangedSignal(
-    "Text"
-):
-Connect(
+Runtime.connect(SearchBox:GetPropertyChangedSignal("Text"),
     function()
 
-        task.delay(
+        Runtime.task.delay(
             0.15,
             rebuildSearch
         )
@@ -6799,11 +6764,10 @@ local function updateStatusPage()
 end
 
 
-RefreshButton.Activated:
-Connect(
+Runtime.connect(RefreshButton.Activated,
     function()
 
-        task.spawn(
+        Runtime.task.spawn(
             function()
 
                 refresh()
@@ -6979,12 +6943,13 @@ local function renderModes()
 end
 
 
-AutoToggle.Activated:
-Connect(
+Runtime.connect(AutoToggle.Activated,
     function()
 
         Settings.autoTrade =
             not Settings.autoTrade
+
+        if not Settings.autoTrade then Runtime.disableAutomation() end
 
         if Settings.autoTrade then
             -- Real AUTO TRADE is always strict. The old estimated-value
@@ -7065,8 +7030,7 @@ local function renderTestEstimated()
 end
 
 
-TestEstimatedToggle.Activated:
-Connect(
+Runtime.connect(TestEstimatedToggle.Activated,
     function()
 
         Settings.blockEstimated =
@@ -7122,8 +7086,7 @@ local function renderAllowEstimatedOwnPets()
 end
 
 
-AllowEstimatedOwnPetsToggle.Activated:
-Connect(
+Runtime.connect(AllowEstimatedOwnPetsToggle.Activated,
     function()
 
         Settings.allowEstimatedOwnPets =
@@ -7277,8 +7240,7 @@ local function bindNumber(
     max
 )
 
-    input.FocusLost:
-    Connect(
+    Runtime.connect(input.FocusLost,
         function()
 
             local value =
@@ -7504,8 +7466,7 @@ local function renderMinValueMode()
 end
 
 
-MinValueModeToggle.Activated:
-Connect(
+Runtime.connect(MinValueModeToggle.Activated,
     function()
 
         Settings.minValueMode =
@@ -7546,9 +7507,9 @@ for _, input in ipairs({
     TheirMinValueInput,
     AllMinValueInput,
 }) do
-    input.FocusLost:Connect(
+    Runtime.connect(input.FocusLost,
         function()
-            task.defer(renderMinValueMode)
+            Runtime.task.defer(renderMinValueMode)
         end
     )
 end
@@ -7605,8 +7566,7 @@ AllowedInput.TextWrapped =
     true
 
 
-AllowedInput.FocusLost:
-Connect(
+Runtime.connect(AllowedInput.FocusLost,
     function()
 
         Settings.allowedItems =
@@ -7667,8 +7627,7 @@ local function renderChat()
 end
 
 
-ChatToggle.Activated:
-Connect(
+Runtime.connect(ChatToggle.Activated,
     function()
 
         Settings.chatRequests =
@@ -7940,8 +7899,7 @@ local function renderUnwantedIncoming()
         or C.PANEL2
 end
 
-UnwantedIncomingToggle.Activated:
-Connect(
+Runtime.connect(UnwantedIncomingToggle.Activated,
     function()
 
         Settings.excludeUnwantedIncomingNoPotion =
@@ -7968,7 +7926,7 @@ do
         InventorySuggestToggle.Text = "INVENTORY SUGGEST: " .. (Settings.inventorySuggestions and "ON" or "OFF")
         InventorySuggestToggle.BackgroundColor3 = Settings.inventorySuggestions and Color3.fromRGB(40,105,70) or C.PANEL2
     end
-    InventorySuggestToggle.Activated:Connect(function()
+    Runtime.connect(InventorySuggestToggle.Activated,function()
         Settings.inventorySuggestions = not Settings.inventorySuggestions
         local flow = ENV.__AM_ANALYZER_INVENTORY_FLOW
         if not Settings.inventorySuggestions and type(flow) == "table" and type(flow.stop) == "function" then flow.stop("disabled in Settings") end
@@ -8813,7 +8771,7 @@ local function getPlazaServers(placeId)
             break
         end
 
-        task.wait()
+        Runtime.task.wait()
     end
 
     return servers
@@ -9019,65 +8977,62 @@ local function findNewPlazaServer(placeId)
 end
 
 
-local function teleportToPlazaTarget(
-    placeId,
-    serverId
-)
+local function releasePlazaReservation(target)
+    if not target or not target.JobId then return end
+    local data = loadPlazaDatabase()
+    local info = data.Active[target.JobId]
+    if type(info) == "table" and info.Owner == PLAZA_CLONE_ID then
+        data.Active[target.JobId], data.Visited[target.JobId] = nil, nil
+        savePlazaDatabase(data)
+    end
+end
 
-    if PlazaRouter.teleporting then
+local function teleportFailed(reason)
+    local pending = PlazaRouter.pendingTeleport
+    if not pending then return end
+    PlazaRouter.pendingTeleport = nil
+    PlazaRouter.teleporting, PlazaRouter.preparing = false, false
+    PlazaRouter.readyForTrading = true
+    PlazaRouter.clearSince = nil
+    PlazaRouter.retryAt = os.clock() + PLAZA_HOP_SETTINGS.RetrySeconds
+    releasePlazaReservation(pending.target)
+    markCurrentPlazaServer()
+    plazaLog("TELEPORT FAILED • TRADING RESUMED • RETRY LATER", tostring(reason))
+end
+
+local function plazaTradeClear()
+    local state = Runtime.state
+    local pendingRequest = state and state.target and state.requestStarted
+        and state.target.Parent and os.clock() - state.requestStarted < Settings.requestTimeout
+    if getTrade() or pendingRequest then
+        PlazaRouter.clearSince = nil
         return false
     end
+    PlazaRouter.clearSince = PlazaRouter.clearSince or os.clock()
+    return os.clock() - PlazaRouter.clearSince >= 8
+end
 
-    PlazaRouter.teleporting =
-        true
-
-    PlazaRouter.readyForTrading =
-        false
-
-    local ok,
-        err =
-        pcall(
-            function()
-
-                if
-                    serverId
-                    and serverId ~= ""
-                then
-
-                    TeleportService:
-                    TeleportToPlaceInstance(
-                        placeId,
-                        serverId,
-                        LocalPlayer
-                    )
-
-                else
-
-                    TeleportService:
-                    Teleport(
-                        placeId,
-                        LocalPlayer
-                    )
-                end
-            end
-        )
-
-    if not ok then
-
-        PlazaRouter.teleporting =
-            false
-
-        plazaLog(
-            "TELEPORT ERROR",
-            tostring(
-                err
-            )
-        )
-
+local function teleportToPlazaTarget(placeId, serverId)
+    local target = {PlaceId = placeId, JobId = serverId}
+    -- This is the final guard after HTTP and reservation work. No yield is
+    -- permitted between this check and initiating the teleport.
+    if not Runtime.alive() or not Gui.Parent or not Settings.plazaAutoRoute
+        or PlazaRouter.teleporting or not plazaTradeClear() then
+        releasePlazaReservation(target)
         return false
     end
-
-    return true
+    PlazaRouter.preparedTarget = nil
+    PlazaRouter.teleporting, PlazaRouter.readyForTrading = true, false
+    PlazaRouter.pendingTeleport = {target = target, started = os.clock()}
+    local ok, err = pcall(function()
+        if serverId and serverId ~= "" then
+            TeleportService:TeleportToPlaceInstance(placeId, serverId, LocalPlayer)
+        else
+            TeleportService:Teleport(placeId, LocalPlayer)
+        end
+    end)
+    if not ok then teleportFailed(err) return false end
+    return PlazaRouter.pendingTeleport ~= nil
 end
 
 
@@ -9164,7 +9119,7 @@ local function routeNormalServerToPlaza()
 
     -- If the universe-place endpoint is temporarily unavailable, at least
     -- detect that the CURRENT place itself is clearly a Trading Plaza.
-    if #plazaPlaces == 0 then
+    do
 
         local currentName =
             getCurrentPlaceName()
@@ -9270,62 +9225,24 @@ end
 
 
 local function hopCurrentTradingPlaza()
-
-    if
-        not PlazaRouter.currentIsPlaza
-    then
-
+    if not PlazaRouter.currentIsPlaza or not Runtime.alive() or not Gui.Parent
+        or not Settings.plazaAutoRoute or PlazaRouter.teleporting then return false end
+    if not plazaTradeClear() then return false end
+    local placeId = tonumber(PlazaRouter.currentPlazaPlaceId) or tonumber(game.PlaceId)
+    if not placeId then return false end
+    PlazaRouter.preparing = true
+    local ok, target = pcall(findNewPlazaServer, placeId)
+    if not ok or not target then
+        PlazaRouter.preparing = false
+        PlazaRouter.retryAt = os.clock() + PLAZA_HOP_SETTINGS.RetrySeconds
+        plazaLog("NEW PLAZA SERVER NOT FOUND • RETRY LATER", ok and "" or tostring(target))
         return false
     end
-
-    local placeId =
-        tonumber(
-            PlazaRouter.currentPlazaPlaceId
-        )
-        or tonumber(
-            game.PlaceId
-        )
-
-    if not placeId then
-        return false
-    end
-
-    clearCurrentPlazaActive()
-
-    local target =
-        findNewPlazaServer(
-            placeId
-        )
-
-    if not target then
-
-        plazaLog(
-            "NEW PLAZA SERVER NOT FOUND • RETRY LATER"
-        )
-
-        markCurrentPlazaServer()
-
-        return false
-    end
-
-    plazaLog(
-        "PLAZA HOP ->",
-        target.JobId,
-        target.Playing
-        .. "/"
-        .. target.MaxPlayers
-    )
-
-    setTestStatus(
-        "PLAZA HOP • NEW SERVER",
-        C.YELLOW
-    )
-
-    return
-        teleportToPlazaTarget(
-            target.PlaceId,
-            target.JobId
-        )
+    PlazaRouter.preparedTarget = target
+    local hopped = teleportToPlazaTarget(target.PlaceId, target.JobId)
+    if not hopped then releasePlazaReservation(target) PlazaRouter.preparedTarget = nil end
+    PlazaRouter.preparing = false
+    return hopped
 end
 
 
@@ -9343,267 +9260,71 @@ plazaLog(
 )
 
 
--- Heartbeat for multi-clone collision avoidance.
-task.spawn(
-    function()
-
-        while
-            Gui.Parent
-            and Settings.plazaAutoRoute
-        do
-
-            if
-                PlazaRouter.currentIsPlaza
-            then
-
-                markCurrentPlazaServer()
-            end
-
-            task.wait(
-                PLAZA_HOP_SETTINGS.HeartbeatSeconds
-            )
-        end
+-- One persistent supervisor owns routing, hopping and failure recovery.
+Runtime.connect(TeleportService.TeleportInitFailed, function(player, _, message, placeId, options)
+    local pending = PlazaRouter.pendingTeleport
+    if player ~= LocalPlayer or not pending or tonumber(placeId) ~= tonumber(pending.target.PlaceId) then return end
+    if options and pending.target.JobId then
+        local ok, job = pcall(function() return options.ServerInstanceId end)
+        if ok and job and job ~= "" and job ~= pending.target.JobId then return end
     end
-)
+    teleportFailed(message)
+end)
+Runtime.cleanups[#Runtime.cleanups + 1] = function()
+    releasePlazaReservation(PlazaRouter.preparedTarget)
+    if PlazaRouter.pendingTeleport then releasePlazaReservation(PlazaRouter.pendingTeleport.target) end
+    clearCurrentPlazaActive()
+end
 
-
--- Classification + normal-server routing.
-task.spawn(
-    function()
-
-        if
-            not Settings.plazaAutoRoute
-        then
-
-            PlazaRouter.readyForTrading =
-                true
-
-            return
-        end
-
-        while
-            Gui.Parent
-            and not PlazaRouter.currentIsPlaza
-            and not PlazaRouter.teleporting
-        do
-
-            local ok,
-                err =
-                pcall(
-                    routeNormalServerToPlaza
-                )
-
-            if not ok then
-
-                plazaLog(
-                    "ROUTER ERROR",
-                    tostring(
-                        err
-                    )
-                )
-            end
-
-            if
-                PlazaRouter.currentIsPlaza
-                or PlazaRouter.teleporting
-            then
-
-                break
-            end
-
-            task.wait(
-                PLAZA_HOP_SETTINGS.RetrySeconds
-            )
-        end
+Runtime.task.spawn(function()
+    local lastHeartbeat = -math.huge
+    local enteredAt = os.clock()
+    if tonumber(game.PlaceId) == KNOWN_TRADING_HUB_PLACE_ID then
+        PlazaRouter.currentIsPlaza, PlazaRouter.currentPlazaPlaceId = true, tonumber(game.PlaceId)
+        PlazaRouter.readyForTrading = true
     end
-)
-
-
--- Once we are in Trading Plaza, wait the editable hop interval (default 20m).
--- 0 disables auto-hop. At the deadline NEVER teleport during a trade; wait until
--- the trade is fully closed, then require 8 clean seconds before hopping.
-task.spawn(
-    function()
-
-        if
-            not Settings.plazaAutoRoute
-        then
-
-            return
-        end
-
-        while
-            Gui.Parent
-        do
-
-            if
-                not PlazaRouter.currentIsPlaza
-            then
-
-                task.wait(
-                    2
-                )
-
-                continue
+    while Runtime.alive() and Gui.Parent do
+        local now = os.clock()
+        if PlazaRouter.pendingTeleport then
+            if now - PlazaRouter.pendingTeleport.started >= 45 then
+                teleportFailed("No completed departure within 45 seconds")
             end
-
-            local hopMinutes =
-                math.max(
-                    0,
-                    tonumber(Settings.plazaHopMinutes) or 15
-                )
-
-            if hopMinutes <= 0 then
-                setTestStatus(
-                    "PLAZA AUTO HOP: OFF",
-                    C.MUTED
-                )
-
-                task.wait(5)
-                continue
-            end
-
-            local seconds =
-                math.max(
-                    60,
-                    hopMinutes * 60
-                )
-
-            plazaLog(
-                "HOP TIMER START",
-                valueText(hopMinutes),
-                "MIN • SAFE MODE: WAIT TRADE END"
-            )
-
-            local started =
-                os.clock()
-
-            local nextStatusLog =
-                60
-
-            while
-                Gui.Parent
-                and PlazaRouter.currentIsPlaza
-                and not PlazaRouter.teleporting
-                and os.clock()
-                    - started
-                    < seconds
-            do
-
-                local elapsed =
-                    os.clock()
-                    - started
-
-                if elapsed >= nextStatusLog then
-
-                    plazaLog(
-                        "HOP TIMER",
-                        math.max(
-                            0,
-                            math.ceil(
-                                (seconds - elapsed) / 60
-                            )
-                        ),
-                        "MIN LEFT"
-                    )
-
-                    nextStatusLog =
-                        nextStatusLog
-                        + 60
+        elseif not Settings.plazaAutoRoute then
+            PlazaRouter.preparing, PlazaRouter.readyForTrading, PlazaRouter.clearSince = false, true, nil
+        elseif now >= (PlazaRouter.retryAt or 0) then
+            if PlazaRouter.currentIsPlaza then
+                if now - lastHeartbeat >= PLAZA_HOP_SETTINGS.HeartbeatSeconds then
+                    markCurrentPlazaServer()
+                    lastHeartbeat = now
                 end
-
-                task.wait(
-                    5
-                )
-            end
-
-            if
-                not Gui.Parent
-                or PlazaRouter.teleporting
-            then
-
-                return
-            end
-
-            -- NEVER hop while a trade is active.
-            -- After the trade disappears, require 8 continuous seconds with no
-            -- trade data before teleporting. This protects the second-confirm /
-            -- closing transition where ClientData can briefly flicker.
-            local clearSince = nil
-
-            while Gui.Parent do
-                if getTrade() then
-                    clearSince = nil
-
-                    setTestStatus(
-                        "HOP READY • WAITING CURRENT TRADE TO FINISH",
-                        C.YELLOW
-                    )
+                local minutes = math.max(0, tonumber(Settings.plazaHopMinutes) or 15)
+                if minutes > 0 and now - enteredAt >= minutes * 60 then
+                    hopCurrentTradingPlaza()
                 else
-                    if not clearSince then
-                        clearSince = os.clock()
-
-                        plazaLog(
-                            "TRADE ENDED • SAFE HOP IN 8 SEC IF NO NEW TRADE"
-                        )
-                    end
-
-                    local clearFor = os.clock() - clearSince
-                    local remaining = math.max(0, 8 - clearFor)
-
-                    setTestStatus(
-                        string.format(
-                            "SAFE HOP • NO TRADE %.1fs / 8s",
-                            clearFor
-                        ),
-                        C.YELLOW
-                    )
-
-                    if clearFor >= 8 then
-                        break
+                    PlazaRouter.clearSince = nil
+                end
+            else
+                -- Stop new outbound requests while preparing. Incoming or
+                -- existing trades are still managed by the main controller.
+                PlazaRouter.preparing = true
+                if plazaTradeClear() then
+                    local ok, result = pcall(routeNormalServerToPlaza)
+                    if not PlazaRouter.teleporting then
+                        PlazaRouter.preparing = false
+                        PlazaRouter.readyForTrading = true
+                        if ok and result and PlazaRouter.currentIsPlaza then
+                            enteredAt, lastHeartbeat = os.clock(), -math.huge
+                        else
+                            PlazaRouter.retryAt = os.clock() + PLAZA_HOP_SETTINGS.RetrySeconds
+                            if not ok then plazaLog("ROUTER ERROR", tostring(result)) end
+                        end
                     end
                 end
-
-                task.wait(1)
             end
-
-            if not Gui.Parent then
-                return
-            end
-
-            local hopped =
-                false
-
-            local ok,
-                result =
-                pcall(
-                    hopCurrentTradingPlaza
-                )
-
-            if ok then
-                hopped = result == true
-            else
-
-                plazaLog(
-                    "HOP ERROR",
-                    tostring(
-                        result
-                    )
-                )
-            end
-
-            if hopped then
-                return
-            end
-
-            -- Failed to locate/teleport to a new server. Retry soon instead
-            -- of waiting another full 20 minutes.
-            task.wait(
-                PLAZA_HOP_SETTINGS.RetrySeconds
-            )
         end
+        Runtime.task.wait(1)
     end
-)
+end)
 
 end -- PLAZA ROUTER LOCAL SCOPE (prevents Luau main-chunk local limit)
 
@@ -9678,11 +9399,10 @@ local function scanInventoryAndLog(reason)
 end
 
 
-ScanInventory.Activated:
-Connect(
+Runtime.connect(ScanInventory.Activated,
     function()
 
-        task.spawn(
+        Runtime.task.spawn(
             function()
 
                 scanInventoryAndLog(
@@ -9785,12 +9505,15 @@ local State = {
 }
 
 
+Runtime.state = State
+
 local PlayerCooldowns =
     {}
 
 
 local function resetState()
     InventoryFlow.stop("trade state reset")
+    State.unacceptRequired, State.declineRequested, State.policySignature = nil, nil, nil
 
     State.target =
         nil
@@ -9940,42 +9663,18 @@ end
 --============================================================
 
 local function sendTrade(player)
+    if not Runtime.alive() or PlazaRouter.preparing or PlazaRouter.teleporting then return false end
+    if not TradeRemote.SendRequest or not player then return false end
 
-    if
-        not TradeRemote.SendRequest
-        or not player
-    then
+    local ok, result = remoteCall(TradeRemote.SendRequest, player)
+    if ok then return result ~= false end
 
-        return false
-    end
-
-    local ok =
-        remoteCall(
-            TradeRemote.SendRequest,
-            player
-        )
-
-    if ok then
-        return true
-    end
-
-    ok =
-        remoteCall(
-            TradeRemote.SendRequest,
-            player.Name
-        )
-
-    if ok then
-        return true
-    end
-
-    ok =
-        remoteCall(
-            TradeRemote.SendRequest,
-            player.UserId
-        )
-
-    return ok
+    -- Try another supported argument only if the invocation failed. A server
+    -- rejection is final; do not send the same rejected request three times.
+    ok, result = remoteCall(TradeRemote.SendRequest, player.Name)
+    if ok then return result ~= false end
+    ok, result = remoteCall(TradeRemote.SendRequest, player.UserId)
+    return ok and result ~= false
 end
 
 
@@ -10018,54 +9717,89 @@ local function confirmed(offer)
 end
 
 
-local function unaccept(myOffer)
-
-    if
-        accepted(
-            myOffer
-        )
-        and TradeRemote.Unaccept
-    then
-
-        remoteCall(
-            TradeRemote.Unaccept
-        )
-
-        testLog(
-            "UNACCEPT"
-        )
-    end
-
-    -- Any unaccept/cancel of our first-stage approval invalidates the
-    -- second-confirm timer. A new stable first ACCEPT must start a fresh wait.
-    State.acceptedSignature =
-        nil
-
-    State.firstAcceptAt =
-        nil
-
-    State.firstAcceptSignature =
-        nil
-
-    State.confirmWaitLoggedSignature =
-        nil
+function Runtime.clearAcceptState()
+    State.acceptedSignature, State.firstAcceptAt, State.firstAcceptSignature = nil, nil, nil
+    State.confirmWaitLoggedSignature = nil
 end
 
+local function unaccept(myOffer)
+    local live = getTrade()
+    local mine, _, _, partner = getTradeSides(live)
+    if not mine or (State.tradeID and tostring(live.trade_id or live.id or playerName(partner)) ~= State.tradeID) then return false end
+    if offerSignature(mine) ~= offerSignature(myOffer) then return false end
+    local key = Runtime.tradeKey(live, partner)
+    if not accepted(mine) and not Runtime.tradeInConfirmation(live) then
+        State.unacceptRequired = nil
+        Runtime.clearAcceptState()
+        return true
+    end
+    -- Keep this barrier until a live negotiation offer is visibly unaccepted.
+    -- Neither an exception nor an RPC acknowledgement proves that transition.
+    if not State.unacceptRequired or State.unacceptRequired.key ~= key then
+        State.unacceptRequired = {key = key, since = os.clock()}
+    end
+    local pending = State.unacceptRequired
+    if pending.busy or (pending.lastAttempt and os.clock() - pending.lastAttempt < 2) then return false end
+    if not TradeRemote.Unaccept then return false end
+    pending.lastAttempt, pending.busy = os.clock(), true
+    local ok, result = remoteCall(TradeRemote.Unaccept)
+    pending.busy = false
+    local current = getTrade()
+    local currentMine, _, _, currentPartner = getTradeSides(current)
+    if State.unacceptRequired ~= pending or not currentMine or Runtime.tradeKey(current, currentPartner) ~= key then return false end
+    if not accepted(currentMine) and not Runtime.tradeInConfirmation(current) then
+        State.unacceptRequired = nil
+        Runtime.clearAcceptState()
+        testLog("UNACCEPT OBSERVED")
+        return true
+    end
+    testLog(ok and result ~= false and "UNACCEPT SENT • WAIT LIVE RESET" or "UNACCEPT FAILED • RETRY")
+    return false
+end
 
 local function decline()
-
-    if TradeRemote.Decline then
-
-        remoteCall(
-            TradeRemote.Decline
-        )
-
-        testLog(
-            "DECLINE"
-        )
-    end
+    local live = getTrade()
+    local mine, _, _, partner = getTradeSides(live)
+    if not mine or (State.tradeID and tostring(live.trade_id or live.id or playerName(partner)) ~= State.tradeID) then return false end
+    local key = Runtime.tradeKey(live, partner)
+    if not State.declineRequested or State.declineRequested.key ~= key then State.declineRequested = {key = key} end
+    local pending = State.declineRequested
+    if InventoryFlow then InventoryFlow.stop("Trade cancellation requested") end
+    if pending.busy or (pending.lastAttempt and os.clock() - pending.lastAttempt < 2) then return false end
+    if not TradeRemote.Decline then return false end
+    pending.lastAttempt, pending.busy = os.clock(), true
+    local ok, result = remoteCall(TradeRemote.Decline)
+    pending.busy = false
+    local current = getTrade()
+    local currentMine, _, _, currentPartner = getTradeSides(current)
+    if State.declineRequested ~= pending then return false end
+    if not currentMine or Runtime.tradeKey(current, currentPartner) ~= key then return ok and result ~= false end
+    State.declineSent = ok and result ~= false
+    testLog(State.declineSent and "DECLINE SENT • WAIT TRADE CLOSED" or "DECLINE FAILED • RETRY")
+    return State.declineSent
 end
 
+function Runtime.pruneDisallowed(trade)
+    local context = Runtime.captureTrade(trade)
+    local live, _, mine = Runtime.liveContext(context, true, true)
+    if not live or Runtime.tradeInConfirmation(live) then return false end
+    local remove = {}
+    for _, item in pairs(getOfferItems(mine)) do
+        if not isAllowed(effectiveItemValue(item).name) then remove[#remove + 1] = tostring(itemUID(item)) end
+    end
+    if #remove == 0 then return true end
+    if not unaccept(mine) then return false end
+    for _, uid in ipairs(remove) do
+        Runtime.task.wait(math.max(0.1, tonumber(Settings.itemActionDelay) or 0.85))
+        live, _, mine = Runtime.liveContext(context, false, true)
+        if not live or Runtime.tradeInConfirmation(live) or accepted(mine) then return false end
+        local ok, result = removeOurItem(uid)
+        if not Runtime.liveContext(context, false, true) or not ok or result == false then return false end
+    end
+    State.optimizedSignature, State.acceptReadySignature, State.acceptReadySince = nil, nil, nil
+    State.changedAt = os.clock()
+    return false -- fetch the replicated offer on the next controller iteration
+end
 
 --============================================================
 -- TRADE EVALUATION
@@ -10147,7 +9881,7 @@ local function evaluateTrade(
     }
 
     if
-        mine.hardBlocked > 0
+        mine.hardBlocked > 0 or theirs.hardBlocked > 0
     then
 
         result.blocked =
@@ -10159,9 +9893,32 @@ local function evaluateTrade(
         return result
     end
 
+    if Settings.autoTrade and AMVGG.dataStale then
+        result.blocked = true
+        result.reason = "AMVGG UPDATE FAILED • FRESH PRICES REQUIRED"
+        return result
+    end
+
+    if Settings.autoTrade then
+        for _, row in ipairs(mine.items) do
+            if not isAllowed(row.data.name) then
+                result.blocked, result.reason = true, "OUR ITEM NOT ALLOWED"
+                return result
+            end
+        end
+    end
+
     if Settings.autoTrade and mine.protectedPets > 0 then
         result.blocked = true
         result.reason = "OUR 3 STAR PET PROTECTED"
+        return result
+    end
+
+    -- A catalog entry excluded by the new-item window cannot become a free
+    -- outgoing item. Both Accept and Confirm recheck this condition.
+    if Settings.autoTrade and mine.newIgnored > 0 then
+        result.blocked = true
+        result.reason = "OUR NEW ITEM • AUTO ACCEPT BLOCKED"
         return result
     end
 
@@ -10268,319 +10025,73 @@ end
 -- SECURE ACCEPT / CONFIRM
 --============================================================
 
-local function secureAccept(
-    trade,
-    myOffer,
-    theirOffer
-)
+local function secureAccept(trade, myOffer, theirOffer, expectedContext)
+    if expectedContext and not Runtime.liveContext(expectedContext, true, true) then return false end
+    local context = Runtime.captureTrade(trade)
+    local live, _, mine, theirs = Runtime.liveContext(context, true, true)
+    if not live or fullSignature(mine, theirs) ~= fullSignature(myOffer, theirOffer) then return false end
+    if State.declineRequested then return false end
+    if State.unacceptRequired then unaccept(mine) return false end
+    local evaluation = evaluateTrade(mine, theirs)
+    if evaluation.blocked or not evaluation.valid then unaccept(mine) return false end
+    local signature = fullSignature(mine, theirs)
 
-    local evaluation =
-        evaluateTrade(
-            myOffer,
-            theirOffer
-        )
-
-    if
-        evaluation.blocked
-        or not evaluation.valid
-    then
-
-        unaccept(
-            myOffer
-        )
-
-        return false
-    end
-
-    local signature =
-        fullSignature(
-            myOffer,
-            theirOffer
-        )
-
-    local stage =
-        tostring(
-            trade.current_stage
-            or trade.stage
-            or trade.state
-            or ""
-        ):
-        lower()
-
-    local confirmStage =
-
-        stage:find(
-            "confirm",
-            1,
-            true
-        )
-        ~= nil
-
-        or trade.confirming
-            == true
-
-        or trade.confirmation_started
-            == true
-
-    if confirmStage then
-
-        -- If anything changed after FIRST ACCEPT, never carry the old timer
-        -- into the new offer. The offer must go back through FIRST ACCEPT.
-        if
-            State.acceptedSignature
-            and State.acceptedSignature
-                ~= signature
-        then
-
-            testLog(
-                "CHANGED BEFORE SECOND CONFIRM"
-            )
-
-            unaccept(
-                myOffer
-            )
-
-            return false
+    if Runtime.tradeInConfirmation(live) then
+        if State.acceptedSignature and State.acceptedSignature ~= signature then unaccept(mine) return false end
+        if State.firstAcceptSignature ~= signature or not State.firstAcceptAt then
+            -- A genuinely unobserved/manual first acceptance may be recovered.
+            -- A failed cancellation is kept behind unacceptRequired above.
+            State.acceptedSignature, State.firstAcceptSignature = signature, signature
+            State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
         end
-
-        -- Normally this timestamp is created exactly when we press FIRST
-        -- ACCEPT below. If the executor only notices the trade after it has
-        -- already entered confirmation, start a conservative fresh 10s timer
-        -- from the first moment we observe this exact confirmation offer.
-        if
-            State.firstAcceptSignature
-                ~= signature
-            or not State.firstAcceptAt
-        then
-
-            State.acceptedSignature =
-                signature
-
-            State.firstAcceptSignature =
-                signature
-
-            State.firstAcceptAt =
-                os.clock()
-
-            State.confirmWaitLoggedSignature =
-                nil
-        end
-
-        -- Recalculate continuously during the confirmation countdown.
-        local liveCheck =
-            evaluateTrade(
-                myOffer,
-                theirOffer
-            )
-
-        if
-            liveCheck.blocked
-            or not liveCheck.valid
-        then
-
-            testLog(
-                "SECOND CONFIRM CHECK FAILED"
-            )
-
-            unaccept(
-                myOffer
-            )
-
-            return false
-        end
-
-        local requiredDelay =
-            math.max(
-                0,
-                tonumber(
-                    Settings.secondConfirmDelay
-                )
-                or 10
-            )
-
-        local elapsed =
-            os.clock()
-            - (
-                State.firstAcceptAt
-                or os.clock()
-            )
-
-        local remaining =
-            requiredDelay
-            - elapsed
-
+        local requiredDelay = math.max(0, tonumber(Settings.secondConfirmDelay) or 10)
+        local remaining = requiredDelay - (os.clock() - State.firstAcceptAt)
         if remaining > 0 then
-
-            if
-                State.confirmWaitLoggedSignature
-                ~= signature
-            then
-
-                State.confirmWaitLoggedSignature =
-                    signature
-
-                testLog(
-                    "FIRST ACCEPT DONE • WAIT SECOND CONFIRM",
-                    valueText(
-                        requiredDelay
-                    ),
-                    "SECONDS"
-                )
-            end
-
-            setTestStatus(
-                string.format(
-                    "1ST ACCEPTED • 2ND CONFIRM IN %.1fs",
-                    remaining
-                ),
-                C.YELLOW
-            )
-
+            setTestStatus(string.format("1ST ACCEPTED • 2ND CONFIRM IN %.1fs", remaining), C.YELLOW)
             return true
         end
-
-        -- Final value/signature check at the exact moment of SECOND CONFIRM.
-        local finalSignature =
-            fullSignature(
-                myOffer,
-                theirOffer
-            )
-
-        if finalSignature ~= signature then
-
-            testLog(
-                "OFFER MOVED AT SECOND CONFIRM"
-            )
-
-            unaccept(
-                myOffer
-            )
-
-            return false
-        end
-
-        local final =
-            evaluateTrade(
-                myOffer,
-                theirOffer
-            )
-
-        if
-            final.blocked
-            or not final.valid
-        then
-
-            testLog(
-                "FINAL CHECK FAILED"
-            )
-
-            unaccept(
-                myOffer
-            )
-
-            return false
-        end
-
-        if
-            not confirmed(
-                myOffer
-            )
-            and TradeRemote.Confirm
-        then
-
-            testLog(
-                "SECOND CONFIRM AFTER",
-                valueText(
-                    requiredDelay
-                ),
-                "SEC • RAW",
-                string.format(
-                    "%.2f%%",
-                    final.profit
-                )
-            )
-
-            remoteCall(
-                TradeRemote.Confirm
-            )
-        end
-
+        live, _, mine, theirs = Runtime.liveContext(context, true, true)
+        if not live or not Runtime.tradeInConfirmation(live) or State.unacceptRequired or State.declineRequested then return false end
+        local final = evaluateTrade(mine, theirs)
+        if final.blocked or not final.valid then unaccept(mine) return false end
+        if confirmed(mine) then return true end
+        if not TradeRemote.Confirm then return false end
+        local ok, result = remoteCall(TradeRemote.Confirm)
+        if not Runtime.liveContext(context, true, true) then return false end
+        if not ok or result == false then testLog("CONFIRM FAILED") return false end
+        testLog("SECOND CONFIRM SENT AFTER", requiredDelay, "SECONDS")
         return true
     end
 
-    if
-        not accepted(
-            myOffer
-        )
-    then
-
-        testLog(
-            "FIRST ACCEPT • RAW",
-            string.format(
-                "%.2f%%",
-                evaluation.profit
-            )
-        )
-
-        local ok =
-            remoteCall(
-                TradeRemote.Accept
-            )
-
-        if ok then
-
-            State.acceptedSignature =
-                signature
-
-            State.firstAcceptSignature =
-                signature
-
-            -- IMPORTANT: the 10-second SECOND CONFIRM countdown starts
-            -- from the moment FIRST ACCEPT is actually sent.
-            State.firstAcceptAt =
-                os.clock()
-
-            State.confirmWaitLoggedSignature =
-                nil
-        else
-
-            State.acceptedSignature =
-                nil
-
-            State.firstAcceptSignature =
-                nil
-
-            State.firstAcceptAt =
-                nil
-
-            State.confirmWaitLoggedSignature =
-                nil
+    if not accepted(mine) then
+        if not TradeRemote.Accept then return false end
+        local ok, result = remoteCall(TradeRemote.Accept)
+        local current, _, freshMine = Runtime.liveContext(context, true, true)
+        if not current then
+            -- If the same trade survived but changed during the reply, require
+            -- an observed first-stage reset before any later confirmation.
+            local changed = getTrade()
+            local changedMine, _, _, changedPartner = getTradeSides(changed)
+            if changedMine and Runtime.tradeKey(changed, changedPartner) == context.key
+                and AutoTradeGeneration == context.generation then
+                State.unacceptRequired = {key = context.key, since = os.clock()}
+            end
+            return false
         end
-
-    elseif
-        State.firstAcceptSignature
-            ~= signature
-        or not State.firstAcceptAt
-    then
-
-        -- State-sync fallback: we are accepted already but did not observe
-        -- the click that caused it. Be conservative and start a fresh timer.
-        State.acceptedSignature =
-            signature
-
-        State.firstAcceptSignature =
-            signature
-
-        State.firstAcceptAt =
-            os.clock()
-
-        State.confirmWaitLoggedSignature =
-            nil
+        if not ok or result == false then
+            Runtime.clearAcceptState()
+            testLog("FIRST ACCEPT FAILED")
+            return false
+        end
+        State.acceptedSignature, State.firstAcceptSignature = signature, signature
+        State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
+        testLog("FIRST ACCEPT SENT")
+    elseif State.firstAcceptSignature ~= signature or not State.firstAcceptAt then
+        State.acceptedSignature, State.firstAcceptSignature = signature, signature
+        State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
     end
-
     return true
 end
-
 
 --============================================================
 -- SHOWCASE
@@ -10717,6 +10228,7 @@ do
     local previous = ENV[MODULE_KEY]
     if type(previous) == "table" and type(previous.stop) == "function" then pcall(previous.stop, "replaced") end
     ENV[MODULE_KEY] = InventoryFlow
+    Runtime.flow = InventoryFlow
     local UIManager
 
     function InventoryFlow.stop(reason)
@@ -10726,7 +10238,8 @@ do
     end
     function InventoryFlow.engaged()
         local session = InventoryFlow.session
-        return Settings.inventorySuggestions and session and session.approved == true and session.mode ~= "fallback"
+        return Settings.inventorySuggestions and session and session.approved == true
+            and session.mode ~= "fallback" and (session.active or session.rounds > 0)
     end
     function InventoryFlow.holdAccept()
         local session = InventoryFlow.session
@@ -10790,16 +10303,39 @@ end
 
 
 
+    function InventoryFlow.sendQuickChat(partner, index, fallback)
+        if not Settings.autoTrade or not Settings.chatRequests then return false end
+        if TradeRemote.QuickChat then
+            local live = getTrade()
+            if not live then return false end
+            local _, _, _, other = getTradeSides(live)
+            local id, name = identity(partner)
+            local liveID = identity(other)
+            if not live or not id or liveID ~= id
+                or tostring(live.trade_id or live.id or playerName(other)) ~= MainState.tradeID then return false end
+            local target = typeof(partner) == "Instance" and partner
+                or (name and Players:FindFirstChild(name)) or Players:GetPlayerByUserId(id)
+            if not target or target.ClassName ~= "Player" or target.UserId ~= id then return false end
+            -- Captured native signature: SendQuickChat(partner Player, emoji index).
+            local ok, result = remoteCall(TradeRemote.QuickChat, target, index)
+            if ok and result ~= false then return true end
+        end
+        return sendChat(fallback)
+    end
+
     function InventoryFlow.begin(trade, partner)
         InventoryFlow.stop("new trade")
         local State = {active = true, approved = nil, permissionCalls = 0, target = nil,
-            tradeID = MainState.tradeID, phase = "permission", mode = "inventory", jobs = {},
-            rounds = 0, attempted = {}, snapshots = 0, scanned = 0, skipped = 0}
+            tradeID = MainState.tradeID, generation = AutoTradeGeneration,
+            prices = AMVGG.version, policy = Runtime.policySignature(),
+            phase = "permission", mode = "inventory", jobs = {},
+            rounds = 0, attempted = {}, snapshots = 0, scanned = 0, skipped = 0,
+            openSequence = 0, dialogClicked = {}}
         InventoryFlow.session = State
         local stop, captureOutgoing
         local function say(text) testLog("INVENTORY", text) end
         local function worker(fn)
-            local thread = task.spawn(function()
+            local thread = Runtime.task.spawn(function()
                 local ok, err = pcall(fn)
                 if not ok and State.active then stop("ERROR: " .. tostring(err):sub(1, 180), "fallback") end
             end)
@@ -10807,6 +10343,9 @@ end
             return thread
         end
         local function current()
+            if State.generation ~= AutoTradeGeneration or not Runtime.alive()
+                or State.prices ~= AMVGG.version or State.policy ~= Runtime.policySignature()
+                or AMVGG.dataStale or AMVGG.loading then return nil end
             if not State.active or State.approved == false or not Gui.Parent or not Settings.autoTrade
                 or not Settings.inventorySuggestions or MainState.tradeID ~= State.tradeID then return nil end
             local live = getTrade()
@@ -10884,22 +10423,156 @@ end
         stop = function(reason, mode)
             if not State.active then return end
             State.active, State.reason, State.phase = false, reason, "done"
-            State.mode = mode or State.mode
+            State.mode = mode or (State.rounds == 0 and "fallback" or State.mode)
             if Hub.capture == captureOutgoing then Hub.capture = nil end
             for _, thread in ipairs(State.jobs) do
-                if thread ~= coroutine.running() and coroutine.status(thread) ~= "dead" and type(task.cancel) == "function" then pcall(task.cancel, thread) end
+                if thread ~= coroutine.running() and coroutine.status(thread) ~= "dead" and type(Runtime.task.cancel) == "function" then pcall(Runtime.task.cancel, thread) end
             end
             table.clear(State.jobs)
-            if State.approved ~= true then MainState.showcaseAddedAt = nil end
+            if State.mode == "fallback" or State.approved ~= true then MainState.showcaseAddedAt = nil end
             say("STOP: " .. tostring(reason) .. (State.mode == "fallback" and " | normal trade flow" or ""))
         end
         State.stop = stop
+        local function quickChat(index, fallback)
+            if not current() then return false end
+            return InventoryFlow.sendQuickChat(State.target, index, fallback)
+        end
+        -- Confirm only the granted-access dialog for the current trade partner.
+        -- This runs outside the namecall observer; ordinary GUI methods are safe here.
+        local function visibleGUI(object)
+            local node = object
+            for _ = 1, 20 do
+                if node == PlayerGui then return true end
+                if not node then return false end
+                if node:IsA("GuiObject") and not node.Visible then return false end
+                if node:IsA("ScreenGui") and not node.Enabled then return false end
+                node = node.Parent
+            end
+            return false
+        end
+        local function plainText(object)
+            if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+                return tostring(object.Text):gsub("<[^>]+>", ""):gsub("%s+", " "):lower():match("^%s*(.-)%s*$")
+            end
+            return ""
+        end
+        local function walkGUI(root, budget, visit)
+            local queue, index = {root}, 1
+            while index <= #queue and index <= budget do
+                local object = queue[index]
+                index += 1
+                if visibleGUI(object) then
+                    visit(object)
+                    for _, child in ipairs(object:GetChildren()) do
+                        if #queue < budget then queue[#queue + 1] = child end
+                    end
+                end
+            end
+        end
+        local function dialogButton(label)
+            -- The prompt and its two buttons must share one small visible container.
+            local container = label.Parent
+            for _ = 1, 8 do
+                if not container or container == PlayerGui then return nil end
+                local buttons = {suggest = {}, cancel = {}}
+                walkGUI(container, 160, function(object)
+                    local text = plainText(object)
+                    if not buttons[text] then return end
+                    local button = object
+                    for _ = 1, 6 do
+                        if not button or button == container then return end
+                        if button:IsA("TextButton") or button:IsA("ImageButton") then
+                            if button.Active ~= false and visibleGUI(button) then buttons[text][button] = true end
+                            return
+                        end
+                        button = button.Parent
+                    end
+                end)
+                local suggest, count = nil, 0
+                for button in pairs(buttons.suggest) do suggest, count = button, count + 1 end
+                if count > 0 then
+                    if count == 1 and next(buttons.cancel) then return suggest end
+                    return nil
+                end
+                container = container.Parent
+            end
+        end
+        local function findGrantedSuggest()
+            if State.approved == false or (State.approved == nil and State.permissionCalls > 0) or not current() then return nil end
+            local expected = State.target.Name:lower() .. " has granted you access to view their items"
+            local roots = PlayerGui:GetChildren()
+            -- Check native dialog layers before potentially larger game panels.
+            table.sort(roots, function(a, b)
+                return (a.Name:lower():find("dialog", 1, true) and 0 or 1)
+                    < (b.Name:lower():find("dialog", 1, true) and 0 or 1)
+            end)
+            local found, seen, matches, scanned = nil, {}, 0, 0
+            for _, root in ipairs(roots) do
+                if scanned >= 800 then break end
+                if root ~= Gui and visibleGUI(root) then
+                    walkGUI(root, math.min(250, 800 - scanned), function(object)
+                        scanned += 1
+                        local text = plainText(object)
+                        if text:sub(1, #expected) == expected and text:find("make a suggestion now?", 1, true) then
+                            local button = dialogButton(object)
+                            if button and not seen[button] then
+                                found, matches = button, matches + 1
+                                seen[button] = true
+                            end
+                        end
+                    end)
+                end
+            end
+            return matches == 1 and found or nil
+        end
+        local function clickGrantedSuggest()
+            local button = findGrantedSuggest()
+            if not button or not current() or State.dialogClicked[button] == State.openSequence then return end
+            -- A matching native granted-access prompt also confirms an already
+            -- cached grant, when the game did not send another permission RPC.
+            if State.approved == nil and State.permissionCalls == 0 then State.approved = true end
+            -- One click event per opening, never both Activated and MouseButton1Click.
+            local signal = button.MouseButton1Click
+            local fire = firesignal or ENV.firesignal
+            local connections = getconnections or ENV.getconnections
+            local callbacks
+            if type(fire) ~= "function" and type(connections) == "function" then
+                local ok, result = pcall(connections, signal)
+                if ok and type(result) == "table" then callbacks = result end
+            end
+            if type(fire) ~= "function" and (not callbacks or #callbacks == 0) then
+                if not State.dialogUnavailableLogged then
+                    say("Suggest dialog found | click callback unavailable; waiting for manual Suggest")
+                    State.dialogUnavailableLogged = true
+                end
+                return
+            end
+            State.dialogClicked[button] = State.openSequence
+            say("Access granted | clicking dialog Suggest")
+            local ok, err = pcall(function()
+                if not current() or not visibleGUI(button) then return end
+                if type(fire) == "function" then
+                    fire(signal)
+                else
+                    for _, connection in ipairs(callbacks) do
+                        if not current() then return end
+                        if connection.Enabled ~= false and connection.Connected ~= false then
+                            if type(connection.Function) == "function" then connection.Function()
+                            elseif type(connection.Fire) == "function" then connection:Fire() end
+                        end
+                    end
+                end
+            end)
+            if not ok then say("Suggest dialog click failed: " .. tostring(err):sub(1, 120)) end
+        end
+
         local function openTarget()
             if not current() then return false end
             if visibleTarget() then return true end
             local tradeApp = app("TradeApp")
             local handler = tradeApp and tradeApp.try_suggest_item
             if type(handler) ~= "function" then stop("TRADEAPP_HANDLER_MISSING", "fallback") return false end
+            State.openSequence += 1
             worker(function() if current() then handler(tradeApp) end end)
             return true
         end
@@ -10908,12 +10581,14 @@ end
             while State.active and os.clock() < untilAt do
                 if State.approved == false then stop("Inventory access declined", "fallback") return nil end
                 if not current() then stop("Trade closed, paused or partner changed") return nil end
+                clickGrantedSuggest()
+                if not current() then return nil end
                 local inventory = sourceInventory()
                 if inventory then
                     if State.approved == nil and State.permissionCalls == 0 then State.approved = true end
                     if State.approved == true then return inventory end
                 end
-                task.wait(0.2)
+                Runtime.task.wait(0.2)
             end
             if State.active then stop("Inventory opening timed out", "fallback") end
         end
@@ -10934,7 +10609,7 @@ local function listInventory(inventory)
                     if uid and not seen[uid] then seen[uid] = true result[#result + 1] = item end
                 end
                 if examined % 40 == 0 then
-                    task.wait()
+                    Runtime.task.wait()
                     if not State.active or not current() or not visibleTarget() then return nil end
                 end
             end
@@ -10947,7 +10622,7 @@ local function finite(value) return type(value) == "number" and value == value a
 local function usable(item, incoming)
     if type(item) ~= "table" or itemLocked(item) or isHardBlockedItem(item) then return nil end
     if incoming then
-        if CommonPetFilter.isIgnoredIncomingEgg(item) or CommonPetFilter.shouldIgnoreIncoming(item) then return nil end
+        if Runtime.incomingItemIgnoreReason(item) then return nil end
     end
     local effective = effectiveItemValue(item)
     if not effective.known or effective.newIgnored or effective.estimated then return nil end
@@ -10967,7 +10642,7 @@ local function candidates(items, theirs)
             local data = usable(item, true)
             if data and data.isRealPet then result[#result + 1] = {item = item, data = data, uid = uid} else State.skipped += 1 end
         end
-        if index % 40 == 0 then task.wait() if not current() then return nil end end
+        if index % 40 == 0 then Runtime.task.wait() if not current() then return nil end end
     end
     table.sort(result, function(a, b)
         if a.data.demandStars ~= b.data.demandStars then return a.data.demandStars > b.data.demandStars end
@@ -10982,6 +10657,15 @@ end
             local id, name = identity(partner)
             State.target = (name and Players:FindFirstChild(name)) or (id and Players:GetPlayerByUserId(id))
             if not State.target or State.target == LocalPlayer then stop("Partner unavailable", "fallback") return end
+            State.phase = "greeting"
+            local greetAt = (MainState.tradeStarted or os.clock()) + 3
+            while State.active and os.clock() < greetAt do
+                if not current() then stop("Trade changed before greeting") return end
+                Runtime.task.wait(math.min(0.1, greetAt - os.clock()))
+            end
+            if not current() then return end
+            quickChat(1, "👋 Lets, trade")
+            State.phase = "permission"
             local observer = ENV.__AM_CHATINV_INSPECTOR_V1_SESSION
             if type(observer) == "table" and type(observer.close) == "function" then pcall(observer.close) end
             local helper = ENV.__AM_INVENTORY_REQUEST_HELPER_V1
@@ -11000,7 +10684,10 @@ end
                 if not visibleTarget() then
                     if not openTarget() then return end
                     inventory = waitInventory(12)
-                else inventory = sourceInventory() end
+                else
+                    inventory = sourceInventory()
+                    if not inventory then inventory = waitInventory(12) end
+                end
                 if not inventory then return end
                 local items = listInventory(inventory)
                 if not items then stop("Inventory changed during scan", "fallback") return end
@@ -11014,7 +10701,7 @@ end
                 if not selected then stop("No eligible 3/2/1-star pets remain", State.rounds == 0 and "fallback" or nil) return end
                 local _, freshMine, freshTheirs = current()
                 if not freshMine or offerSignature(freshMine) ~= mineSignature or offerSignature(freshTheirs) ~= theirSignature then
-                    task.wait(0.2)
+                    Runtime.task.wait(0.2)
                     continue
                 end
                 local latest = sourceInventory()
@@ -11040,20 +10727,36 @@ end
                 local ok, result = remoteCall(TradeRemote.SuggestItem, selected.uid)
                 if not current() then return end
                 if not ok or result == false then stop("Suggest Item failed; no retry", "fallback") return end
+                quickChat(3, "+ please add")
                 local untilAt, added = os.clock() + Settings.addTimeout, false
+                local waitingSignature = offerSignature(freshTheirs)
                 while State.active and os.clock() < untilAt do
                     local _, ownNow, theirNow = current()
                     if not ownNow then return end
                     if accepted(ownNow) or accepted(theirNow) then stop("Offer accepted; finish current trade") return end
+                    local signatureNow = offerSignature(theirNow)
+                    if signatureNow ~= waitingSignature then
+                        waitingSignature = signatureNow
+                        untilAt = os.clock() + Settings.addTimeout
+                    end
                     for _, item in pairs(getOfferItems(theirNow)) do if tostring(itemUID(item)) == selected.uid then added = true break end end
                     if added then break end
-                    task.wait(0.2)
+                    Runtime.task.wait(0.2)
                 end
                 if not added then
                     if State.active then
                         stop("Player did not add suggested pet; finish inventory search")
-                        MainState.declineSent = true
-                        decline()
+                        local latest = getTrade()
+                        local own, theirs = getTradeSides(latest)
+                        local evaluation = own and theirs and evaluateTrade(own, theirs)
+                        if evaluation and not evaluation.blocked and evaluation.valid then
+                            MainState.acceptReadySignature, MainState.acceptReadySince = nil, nil
+                            say("Suggestion timeout • current offer is valid • resume normal check")
+                        else
+                            -- Start the normal ASK ADD idle window for an
+                            -- insufficient offer; do not discard a good trade.
+                            MainState.askStarted, MainState.askSignature = os.clock(), theirs and offerSignature(theirs) or nil
+                        end
                     end
                     return
                 end
@@ -11067,12 +10770,12 @@ end
                     for _, item in pairs(getOfferItems(theirNow)) do if tostring(itemUID(item)) == selected.uid then stillPresent = true break end end
                     if not stillPresent then stop("Requested pet removed; remaining offer will be re-evaluated") return end
                     if accepted(ownNow) or accepted(theirNow) then stop("Offer accepted; finish current trade") return end
-                    local key = offerSignature(theirNow) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|ITEMWIN=" .. tostring(Settings.itemMinimumWinPercent)
+                    local key = Runtime.optimizationKey(theirNow)
                     if MainState.optimizedSignature == key and os.clock() - (MainState.changedAt or os.clock()) >= Settings.settleSeconds then break end
-                    task.wait(0.2)
+                    Runtime.task.wait(0.2)
                 end
                 if not State.active then return end
-                task.wait(1)
+                Runtime.task.wait(1)
             end
             if State.active then stop("Suggestion limit reached; review balanced offer") end
         end
@@ -11081,12 +10784,22 @@ end
                 if State.approved == false then stop("Inventory access declined", "fallback") return end
                 if State.target and not current() then stop("Trade closed, paused or partner changed") return end
                 if os.clock() - (MainState.tradeStarted or os.clock()) > Settings.maxTradeSeconds then stop("Trade timeout") return end
-                task.wait(0.2)
+                Runtime.task.wait(0.2)
             end
         end)
-        worker(main)
+        worker(function()
+            main()
+            -- Every normal early return must release the trade controller.
+            -- The watcher handles cancellation; this handles incomplete data.
+            if State.active then stop("Inventory search interrupted", "fallback") end
+        end)
     end
     function InventoryFlow.step(trade, partner)
+        local existing = InventoryFlow.session
+        if existing and existing.active and (existing.generation ~= AutoTradeGeneration
+            or existing.prices ~= AMVGG.version or existing.policy ~= Runtime.policySignature() or AMVGG.dataStale) then
+            existing.stop("Trade settings or prices changed", "fallback")
+        end
         if not Settings.inventorySuggestions then InventoryFlow.stop("inventory suggestions disabled") return false end
         if not AMVGG.ready or AMVGG.loading then setTestStatus("INVENTORY: WAIT AMVGG", C.YELLOW) return true end
         local session = InventoryFlow.session
@@ -11101,6 +10814,8 @@ end
 
 
 local function manageAutoTrade(trade)
+    local operationContext = Runtime.captureTrade(trade)
+    if not Runtime.liveContext(operationContext, true, false) then return end
 
     local myOffer,
         theirOffer,
@@ -11165,6 +10880,23 @@ local function manageAutoTrade(trade)
         )
     end
 
+    if State.declineRequested then decline() return end
+    if State.unacceptRequired then
+        if not unaccept(myOffer) then setTestStatus("WAIT UNACCEPT • RETRY", C.YELLOW) return end
+        if not Runtime.liveContext(operationContext, true, false) then return end
+    end
+    local policy = Runtime.policySignature()
+    if State.policySignature ~= policy then
+        local changed = State.policySignature ~= nil
+        State.policySignature = policy
+        State.optimizedSignature, State.acceptReadySignature, State.acceptReadySince = nil, nil, nil
+        if changed then
+            State.changedAt = os.clock()
+            if not unaccept(myOffer) then return end
+            if not Runtime.liveContext(operationContext, true, true) then return end
+        end
+    end
+
     if
         os.clock()
         - State.tradeStarted
@@ -11172,9 +10904,6 @@ local function manageAutoTrade(trade)
     then
 
         if not State.declineSent then
-
-            State.declineSent =
-                true
 
             decline()
         end
@@ -11194,9 +10923,7 @@ local function manageAutoTrade(trade)
 
     -- Demand/value refreshes and ITEM MINIMUM WIN changes also invalidate
     -- the optimizer target even when the player's item signature is stable.
-    local optimizationSignature = theirSignature
-        .. "|AMVGG=" .. tostring(AMVGG.version)
-        .. "|ITEMWIN=" .. tostring(Settings.itemMinimumWinPercent)
+    local optimizationSignature = Runtime.optimizationKey(theirOffer)
 
     local signature =
         ourSignature
@@ -11226,8 +10953,7 @@ local function manageAutoTrade(trade)
                 myOffer
             )
 
-            State.acceptedSignature =
-                nil
+            if not Runtime.liveContext(operationContext, true, true) or State.unacceptRequired then return end
         end
 
         State.lastSignature =
@@ -11301,6 +11027,21 @@ local function manageAutoTrade(trade)
     State.lastOurSignature =
         ourSignature
 
+    if AMVGG.loading or not AMVGG.ready then setTestStatus("WAIT AMVGG", C.YELLOW) return end
+    if AMVGG.dataStale then
+        InventoryFlow.stop("Price refresh failed")
+        unaccept(myOffer)
+        setTestStatus("AMVGG UPDATE FAILED • RETRY REFRESH", C.RED)
+        return
+    end
+    if Runtime.tradeInConfirmation(trade) then
+        InventoryFlow.stop("Trade entered confirmation")
+        if AMVGG.loading then setTestStatus("CONFIRM: WAIT PRICE UPDATE", C.YELLOW) return end
+        secureAccept(trade, myOffer, theirOffer, operationContext)
+        return
+    end
+
+    if not Runtime.pruneDisallowed(trade) then return end
     if InventoryFlow.step(trade, partner) then
         unaccept(myOffer)
         return
@@ -11389,9 +11130,7 @@ local function manageAutoTrade(trade)
             State.initialAsk =
                 true
 
-            sendChat(
-                "add any pet/item"
-            )
+            InventoryFlow.sendQuickChat(partner, 3, "+ please add")
 
             testLog(
                 "ASK FIRST ITEM"
@@ -11424,9 +11163,6 @@ local function manageAutoTrade(trade)
             >= Settings.firstItemTimeout
             and not State.declineSent
         then
-
-            State.declineSent =
-                true
 
             decline()
         end
@@ -11546,9 +11282,6 @@ local function manageAutoTrade(trade)
                 >= Settings.unknownBlockTimeout
                 and not State.declineSent
             then
-
-                State.declineSent =
-                    true
 
                 testLog(
                     "BLOCK " .. evaluation.reason .. " TIMEOUT -> DECLINE"
@@ -11761,11 +11494,16 @@ local function manageAutoTrade(trade)
 
         local desired,
             ourValue,
-            cap =
+            cap,
+            optimizationError =
             optimizeOurOffer(
                 evaluation.theirs.effectiveTotal
             )
 
+        if optimizationError or not Runtime.liveContext(operationContext, true, true) then
+            State.optimizedSignature = nil
+            return
+        end
         if
             #desired > 0
             and ourValue > 0
@@ -11866,6 +11604,13 @@ local function manageAutoTrade(trade)
             return
         end
 
+        if myCount > 0 then
+            local ok = rebuildOurOffer(myOffer, {}, theirSignature)
+            if ok then State.optimizedSignature = optimizationSignature end
+            State.acceptReadySignature, State.acceptReadySince = nil, nil
+            State.changedAt = os.clock()
+            return
+        end
         -- Nothing from our inventory can fit below the current cap.
         -- Remember this partner signature so we do not recalculate it
         -- every frame; a new item from them clears it automatically.
@@ -11985,7 +11730,8 @@ local function manageAutoTrade(trade)
         secureAccept(
             trade,
             myOffer,
-            theirOffer
+            theirOffer,
+            operationContext
         )
 
         return
@@ -12010,9 +11756,7 @@ local function manageAutoTrade(trade)
         State.askSignature =
             theirSignature
 
-        if not InventoryFlow.engaged() then
-            sendChat("please add a little")
-        end
+        InventoryFlow.sendQuickChat(partner, 3, "+ please add")
 
         testLog(
             "ASK ADD",
@@ -12045,9 +11789,6 @@ local function manageAutoTrade(trade)
         and not State.declineSent
     then
 
-        State.declineSent =
-            true
-
         decline()
     end
 end
@@ -12058,6 +11799,7 @@ end
 --============================================================
 
 local function runAutoTrade()
+    if getTrade() then PlazaRouter.clearSince = nil end
 
     local trade =
         getTrade()
@@ -12100,7 +11842,7 @@ local function runAutoTrade()
         )
 
         -- Give ClientData a moment to receive the completed trade result.
-        task.wait(
+        Runtime.task.wait(
             1.25
         )
 
@@ -12224,265 +11966,55 @@ end
 --============================================================
 
 local function updateTradeDisplay()
-
-    local trade =
-        getTrade()
-
+    local trade = getTrade()
     if not trade then
-
-        TradeStatus.Text =
-            "WAITING FOR TRADE"
-
-        TradeStatus.TextColor3 =
-            C.MUTED
-
-        TradeInfo.Text =
-            ""
-
+        TradeStatus.Text, TradeStatus.TextColor3, TradeInfo.Text = "WAITING FOR TRADE", C.MUTED, ""
         return
     end
-
-    local myOffer,
-        theirOffer,
-        _,
-        partner =
-        getTradeSides(
-            trade
-        )
-
-    if
-        not myOffer
-        or not theirOffer
-    then
-
-        return
+    local myOffer, theirOffer, _, partner = getTradeSides(trade)
+    if not myOffer or not theirOffer then return end
+    local evaluation = evaluateTrade(myOffer, theirOffer)
+    local mine, theirs = evaluation.mine, evaluation.theirs
+    local lines = {"PARTNER: " .. playerName(partner)}
+    if AMVGG.dataStale then
+        lines[#lines + 1] = "LAST GOOD PRICES • UPDATE FAILED • AUTO ACCEPT BLOCKED"
     end
-
-    local mine =
-        evaluateOffer(
-            myOffer
-        )
-
-    local theirs =
-        evaluateOffer(
-            theirOffer
-        )
-
-    local lines = {
-
-        "PARTNER: "
-        .. playerName(
-            partner
-        ),
-
-        "",
-
-        "========== YOU ==========",
-    }
-
-    for index,
-        itemData in ipairs(
-            mine.items
-        )
-    do
-
-        local data =
-            itemData.data
-
-        local value
-
-        if data.newIgnored then
-
-            value =
-                "NEW<24H IGNORE"
-
-        elseif not data.known then
-
-            value =
-                "UNKNOWN"
-
-        elseif data.estimated then
-
-            value =
-                "~"
-                .. valueText(
-                    data.value
-                )
-
-        else
-
-            value =
-                valueText(
-                    data.value
-                )
+    local function side(title, result, incoming)
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "========== " .. title .. " =========="
+        for index, row in ipairs(result.items) do
+            local data, notes = row.data, {}
+            local value = data.known and valueText(data.value) or "UNKNOWN"
+            if data.estimated then value = "~" .. value end
+            if data.newIgnored then notes[#notes + 1] = "NEW ITEM • NOT COUNTED" end
+            if row.ignoredByMin then notes[#notes + 1] = "BELOW MIN • NOT COUNTED" end
+            if row.ignoredIncomingUnwanted then
+                notes[#notes + 1] = tostring(row.ignoredIncomingReason) .. " • NOT COUNTED"
+            end
+            local analysis = data.analysis
+            if incoming and analysis and analysis.isRealPet then
+                notes[#notes + 1] = analysis.demandStars and ("Demand " .. tostring(analysis.demandStars)) or "DEMAND UNKNOWN"
+            end
+            lines[#lines + 1] = tostring(index) .. ". " .. data.name .. " " .. getVariant(row.raw)
+                .. " = " .. value .. (#notes > 0 and (" [" .. table.concat(notes, " | ") .. "]") or "")
         end
-
-        lines[
-            #lines + 1
-        ] =
-            tostring(index)
-            .. ". "
-            .. data.name
-            .. " "
-            .. getVariant(
-                itemData.raw
-            )
-            .. " = "
-            .. value
+        lines[#lines + 1] = title .. " COUNTED TOTAL = " .. valueText(result.total)
     end
-
-    lines[
-        #lines + 1
-    ] =
-        "YOU TOTAL = "
-        .. valueText(
-            mine.total
-        )
-
-    lines[
-        #lines + 1
-    ] =
-        ""
-
-    lines[
-        #lines + 1
-    ] =
-        "========== THEM =========="
-
-    for index,
-        itemData in ipairs(
-            theirs.items
-        )
-    do
-
-        local data =
-            itemData.data
-
-        local value
-
-        if data.newIgnored then
-
-            value =
-                "NEW<24H IGNORE"
-
-        elseif not data.known then
-
-            value =
-                "UNKNOWN"
-
-        elseif data.estimated then
-
-            value =
-                "~"
-                .. valueText(
-                    data.value
-                )
-
-        else
-
-            value =
-                valueText(
-                    data.value
-                )
-        end
-
-        lines[
-            #lines + 1
-        ] =
-            tostring(index)
-            .. ". "
-            .. data.name
-            .. " "
-            .. getVariant(
-                itemData.raw
-            )
-            .. " = "
-            .. value
+    side("YOU", mine, false)
+    side("THEM", theirs, true)
+    if Settings.autoTrade then
+        lines[#lines + 1] = "THEM DEMAND CREDIT = " .. valueText(theirs.effectiveTotal)
     end
-
-    lines[
-        #lines + 1
-    ] =
-        "THEM TOTAL = "
-        .. valueText(
-            theirs.total
-        )
-
-    TradeInfo.Text =
-        table.concat(
-            lines,
-            "\n"
-        )
-
-    if
-        mine.unknown > 0
-        or theirs.unknown > 0
-    then
-
-        TradeStatus.Text =
-            "UNKNOWN • BLOCK"
-
-        TradeStatus.TextColor3 =
-            C.RED
-
-        return
-    end
-
-    if
-        Settings.blockEstimated
-        and (
-            mine.estimated > 0
-            or theirs.estimated > 0
-        )
-    then
-
-        TradeStatus.Text =
-            "ESTIMATED • BLOCK"
-
-        TradeStatus.TextColor3 =
-            C.ORANGE
-
-        return
-    end
-
-    local profit =
-        profitPercent(
-            mine.total,
-            theirs.total
-        )
-
-    if not profit then
-
-        TradeStatus.Text =
-            "WAITING"
-
-        TradeStatus.TextColor3 =
-            C.YELLOW
-
-    elseif
-        profit
-        >= Settings.minProfitPercent
-    then
-
-        TradeStatus.Text =
-            string.format(
-                "WIN +%.2f%%",
-                profit
-            )
-
-        TradeStatus.TextColor3 =
-            C.GREEN
-
+    TradeInfo.Text = table.concat(lines, "\n")
+    if evaluation.blocked then
+        TradeStatus.Text, TradeStatus.TextColor3 = "BLOCK • " .. tostring(evaluation.reason), C.RED
+    elseif not evaluation.profit then
+        TradeStatus.Text, TradeStatus.TextColor3 = "WAITING", C.YELLOW
     else
-
-        TradeStatus.Text =
-            string.format(
-                "LOSE %.2f%%",
-                profit
-            )
-
-        TradeStatus.TextColor3 =
-            C.RED
+        local label = Settings.autoTrade and (evaluation.valid and "AUTO: VALUE CHECK PASSED" or "AUTO: NEED ADD")
+            or (evaluation.valid and "WIN" or "LOSE")
+        TradeStatus.Text = string.format("%s • COUNTED PROFIT %+.2f%%", label, evaluation.profit)
+        TradeStatus.TextColor3 = evaluation.valid and C.GREEN or C.YELLOW
     end
 end
 
@@ -12589,8 +12121,7 @@ OpenButton.BackgroundColor3 =
     C.ACCENT
 
 
-CloseButton.Activated:
-Connect(
+Runtime.connect(CloseButton.Activated,
     function()
 
         Main.Visible =
@@ -12602,8 +12133,7 @@ Connect(
 )
 
 
-OpenButton.Activated:
-Connect(
+Runtime.connect(OpenButton.Activated,
     function()
 
         Main.Visible =
@@ -12625,7 +12155,7 @@ setBoot(
 )
 
 
-task.spawn(
+Runtime.task.spawn(
     function()
 
         local ok,
@@ -12669,7 +12199,7 @@ setBoot(
 )
 
 
-task.spawn(
+Runtime.task.spawn(
     function()
 
         while Gui.Parent do
@@ -12688,7 +12218,7 @@ task.spawn(
                 )
             end
 
-            task.wait(
+            Runtime.task.wait(
                 0.6
             )
         end
@@ -12706,7 +12236,7 @@ setBoot(
 )
 
 
-task.spawn(
+Runtime.task.spawn(
     function()
 
         while Gui.Parent do
@@ -12718,7 +12248,9 @@ task.spawn(
 
                         if
                             Settings.plazaAutoRoute
-                            and not PlazaRouter.readyForTrading
+                            and not getTrade()
+                            and not (State.target and State.requestStarted)
+                            and (not PlazaRouter.readyForTrading or PlazaRouter.preparing or PlazaRouter.teleporting)
                         then
 
                             setTestStatus(
@@ -12758,7 +12290,7 @@ task.spawn(
                 )
             end
 
-            task.wait(
+            Runtime.task.wait(
                 0.42
             )
         end
@@ -12776,7 +12308,7 @@ setBoot(
 )
 
 
-task.spawn(
+Runtime.task.spawn(
     function()
 
         while Gui.Parent do
@@ -12789,7 +12321,7 @@ task.spawn(
 
             updateStatusPage()
 
-            task.wait(
+            Runtime.task.wait(
                 0.8
             )
         end
@@ -12801,7 +12333,7 @@ task.spawn(
 -- PERIODIC AMVGG REFRESH
 --============================================================
 
-task.spawn(
+Runtime.task.spawn(
     function()
 
         while Gui.Parent do
@@ -12815,7 +12347,7 @@ task.spawn(
                     or 5
                 )
 
-            task.wait(
+            Runtime.task.wait(
                 minutes
                 * 60
             )
@@ -12857,8 +12389,7 @@ task.spawn(
 -- PLAYER CLEANUP
 --============================================================
 
-Players.PlayerRemoving:
-Connect(
+Runtime.connect(Players.PlayerRemoving,
     function(player)
 
         PlayerCooldowns[
@@ -12912,7 +12443,7 @@ print(
 )
 
 
-task.delay(
+Runtime.task.delay(
     2.5,
     function()
 
