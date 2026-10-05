@@ -42,7 +42,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.21"
+    "11.7.22"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -56,7 +56,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] PETS-ONLY VARIANT DEMAND + PROTECTED OUR 3 STAR PETS + 65S UNKNOWN + 100S ASK-ADD"
+    "[AM V" .. VERSION .. "] INVENTORY SUGGEST 3 > 2 > 1 + DEMAND + PROTECTED OUR 3 STAR PETS"
 )
 
 
@@ -1100,6 +1100,7 @@ local CATEGORY_DISPLAY = {
 
 
 local ADOPT_TO_AMVGG = {
+    transport = "vehicles",
 
     pet_accessories =
         "petwear",
@@ -3157,6 +3158,8 @@ local Settings = {
 
     autoTrade =
         false,
+
+    inventorySuggestions = true,
 
     minProfitPercent =
         10,
@@ -7959,6 +7962,22 @@ do
     bindNumber(ItemMinimumWinInput, "itemMinimumWinPercent", 0, 500)
 end
 
+do
+    local InventorySuggestToggle = button(TestCanvas, "", UDim2.new(1,-24,0,36), UDim2.fromOffset(10,1564))
+    local function renderInventorySuggest()
+        InventorySuggestToggle.Text = "INVENTORY SUGGEST: " .. (Settings.inventorySuggestions and "ON" or "OFF")
+        InventorySuggestToggle.BackgroundColor3 = Settings.inventorySuggestions and Color3.fromRGB(40,105,70) or C.PANEL2
+    end
+    InventorySuggestToggle.Activated:Connect(function()
+        Settings.inventorySuggestions = not Settings.inventorySuggestions
+        local flow = ENV.__AM_ANALYZER_INVENTORY_FLOW
+        if not Settings.inventorySuggestions and type(flow) == "table" and type(flow.stop) == "function" then flow.stop("disabled in Settings") end
+        saveSettings()
+        renderInventorySuggest()
+    end)
+    renderInventorySuggest()
+end
+
 local function setTestStatus(
     text,
     color
@@ -9679,6 +9698,8 @@ Connect(
 -- AUTO STATE
 --============================================================
 
+local InventoryFlow
+
 local State = {
 
     target =
@@ -9769,6 +9790,7 @@ local PlayerCooldowns =
 
 
 local function resetState()
+    InventoryFlow.stop("trade state reset")
 
     State.target =
         nil
@@ -10686,6 +10708,398 @@ testLog(
 -- ACTIVE AUTO TRADE
 --============================================================
 
+InventoryFlow = {}
+do
+    local MainState = State
+    local HUB_KEY = "__AM_CHATINV_INSPECTOR_V1_HUB"
+    local S = {hookStatus = "not installed"}
+    local MODULE_KEY = "__AM_ANALYZER_INVENTORY_FLOW"
+    local previous = ENV[MODULE_KEY]
+    if type(previous) == "table" and type(previous.stop) == "function" then pcall(previous.stop, "replaced") end
+    ENV[MODULE_KEY] = InventoryFlow
+    local UIManager
+
+    function InventoryFlow.stop(reason)
+        local session = InventoryFlow.session
+        if session and session.active then session.stop(reason or "stopped") end
+        InventoryFlow.session = nil
+    end
+    function InventoryFlow.engaged()
+        local session = InventoryFlow.session
+        return Settings.inventorySuggestions and session and session.approved == true and session.mode ~= "fallback"
+    end
+    function InventoryFlow.holdAccept()
+        local session = InventoryFlow.session
+        return Settings.inventorySuggestions and session and session.active == true
+    end
+
+local function identity(value)
+    if typeof(value) == "Instance" and value.ClassName == "Player" then return value.UserId, value.Name end
+    if type(value) == "table" then return tonumber(value.user_id or value.userId or value.UserId or value.id), value.username or value.Name or value.name end
+    if type(value) == "number" then return value end
+    if type(value) == "string" then
+        if tonumber(value) then return tonumber(value) end
+        local player = Players:FindFirstChild(value)
+        if player and player.ClassName == "Player" then return player.UserId, player.Name end
+    end
+end
+
+local Hub = ENV[HUB_KEY]
+if type(Hub) ~= "table" then Hub = {} ENV[HUB_KEY] = Hub end
+local function installHook()
+    if Hub.installed then S.hookStatus = "existing passive dispatcher" return end
+    if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
+        S.hookStatus = "UNAVAILABLE: GUI and chat events only"
+        return
+    end
+    local old
+    local wrapper = function(self, ...)
+        local capture = Hub.capture
+        if not capture then return old(self, ...) end
+        local method = getnamecallmethod()
+        if method ~= "FireServer" and method ~= "InvokeServer" and method ~= "SendAsync" then
+            return old(self, ...)
+        end
+        local args = table.pack(...)
+        -- capture must not call Instance methods (even IsA/GetFullName): their
+        -- NAMECALL replaces this thread's original method before old is called.
+        -- Property reads are safe; paths/serialization run on the worker thread.
+        local ok, finish = pcall(capture, self, method, args)
+        if method == "InvokeServer" and ok and type(finish) == "function" then
+            -- Forward exactly once, preserving nils, yields and original errors.
+            -- Never pcall or retry the game's request.
+            local result = table.pack(old(self, ...))
+            pcall(finish, result)
+            return table.unpack(result, 1, result.n)
+        end
+        return old(self, ...)
+    end
+    if type(newcclosure) == "function" then
+        local ok, result = pcall(newcclosure, wrapper)
+        if ok then wrapper = result end
+    end
+    local ok, original = pcall(hookmetamethod, game, "__namecall", wrapper)
+    if ok and type(original) == "function" then
+        old = original
+        Hub.installed = true
+        S.hookStatus = "hookmetamethod (bounded, passive; no nested namecalls)"
+    else
+        S.hookStatus = "FAILED: GUI and chat events only"
+    end
+end
+
+
+
+    function InventoryFlow.begin(trade, partner)
+        InventoryFlow.stop("new trade")
+        local State = {active = true, approved = nil, permissionCalls = 0, target = nil,
+            tradeID = MainState.tradeID, phase = "permission", mode = "inventory", jobs = {},
+            rounds = 0, attempted = {}, snapshots = 0, scanned = 0, skipped = 0}
+        InventoryFlow.session = State
+        local stop, captureOutgoing
+        local function say(text) testLog("INVENTORY", text) end
+        local function worker(fn)
+            local thread = task.spawn(function()
+                local ok, err = pcall(fn)
+                if not ok and State.active then stop("ERROR: " .. tostring(err):sub(1, 180), "fallback") end
+            end)
+            if type(thread) == "thread" then State.jobs[#State.jobs + 1] = thread end
+            return thread
+        end
+        local function current()
+            if not State.active or State.approved == false or not Gui.Parent or not Settings.autoTrade
+                or not Settings.inventorySuggestions or MainState.tradeID ~= State.tradeID then return nil end
+            local live = getTrade()
+            if not live then return nil end
+            local mine, theirs, _, other = getTradeSides(live)
+            local id = identity(other)
+            local token = tostring(live.trade_id or live.id or playerName(other))
+            if not mine or not theirs or not State.target or id ~= State.target.UserId or token ~= State.tradeID then return nil end
+            local stage = tostring(live.current_stage or live.stage or live.state or ""):lower()
+            if live.confirmation_started == true or live.confirming == true or stage:find("confirm",1,true) then return nil end
+            return live, mine, theirs
+        end
+local function app(name)
+    local direct = UIManager and rawget(UIManager, name)
+    if type(direct) == "table" then return direct end
+    for _, key in ipairs({"apps", "_apps", "app_instances"}) do
+        local registry = UIManager and rawget(UIManager, key)
+        local value = type(registry) == "table" and rawget(registry, name)
+        if type(value) == "table" then return value end
+    end
+    local getter = UIManager and rawget(UIManager, "get_app")
+    if type(getter) == "function" then
+        local ok, value = pcall(getter, name)
+        if ok and type(value) == "table" then return value end
+    end
+end
+local function visibleTarget()
+    local object = PlayerGui:FindFirstChild("BackpackApp")
+    local frame = object and object:FindFirstChild("Frame")
+    local header = frame and frame:FindFirstChild("Header")
+    local title = header and header:FindFirstChild("TextLabel")
+    if not title or not State.target then return false end
+    local text = tostring(title.Text):gsub("<[^>]+>", "")
+    if text:upper() ~= State.target.Name:upper() .. "'S BACKPACK" then return false end
+    local node = title
+    for _ = 1, 18 do
+        if not node or node == PlayerGui then return true end
+        if node:IsA("GuiObject") and not node.Visible then return false end
+        if node:IsA("ScreenGui") and not node.Enabled then return false end
+        node = node.Parent
+    end
+    return false
+end
+local function sourceInventory()
+    if not visibleTarget() or not current() then return nil end
+    local backpack = app("BackpackApp")
+    if not backpack then return nil end
+    local inventory = rawget(backpack, "inventory_override")
+    if type(inventory) ~= "table" then return nil end
+    for _, container in ipairs({backpack, inventory}) do
+        for _, key in ipairs({"owner", "owner_id", "owner_user_id", "player", "player_id", "viewing_player"}) do
+            local value = rawget(container, key)
+            if value ~= nil then
+                local id, name = identity(value)
+                if (id and id ~= State.target.UserId) or (name and name:lower() ~= State.target.Name:lower()) then return nil end
+            end
+        end
+    end
+    -- Only the game's own visible, permitted target inventory is considered.
+    return inventory
+end
+
+        captureOutgoing = function(object, method, args)
+            -- No Instance method calls inside __namecall.
+            if not State.active or method ~= "InvokeServer" or typeof(object) ~= "Instance"
+                or object.ClassName ~= "RemoteFunction" or object.Name ~= "TradeAPI/RequestBackpackAccess" then return end
+            local target = args[1]
+            if typeof(target) ~= "Instance" or target.ClassName ~= "Player" or not State.target
+                or target.UserId ~= State.target.UserId then return end
+            State.permissionCalls += 1
+            return function(result)
+                if State.active then State.approved = result[1] == true end
+            end
+        end
+        stop = function(reason, mode)
+            if not State.active then return end
+            State.active, State.reason, State.phase = false, reason, "done"
+            State.mode = mode or State.mode
+            if Hub.capture == captureOutgoing then Hub.capture = nil end
+            for _, thread in ipairs(State.jobs) do
+                if thread ~= coroutine.running() and coroutine.status(thread) ~= "dead" and type(task.cancel) == "function" then pcall(task.cancel, thread) end
+            end
+            table.clear(State.jobs)
+            if State.approved ~= true then MainState.showcaseAddedAt = nil end
+            say("STOP: " .. tostring(reason) .. (State.mode == "fallback" and " | normal trade flow" or ""))
+        end
+        State.stop = stop
+        local function openTarget()
+            if not current() then return false end
+            if visibleTarget() then return true end
+            local tradeApp = app("TradeApp")
+            local handler = tradeApp and tradeApp.try_suggest_item
+            if type(handler) ~= "function" then stop("TRADEAPP_HANDLER_MISSING", "fallback") return false end
+            worker(function() if current() then handler(tradeApp) end end)
+            return true
+        end
+        local function waitInventory(seconds)
+            local untilAt = os.clock() + seconds
+            while State.active and os.clock() < untilAt do
+                if State.approved == false then stop("Inventory access declined", "fallback") return nil end
+                if not current() then stop("Trade closed, paused or partner changed") return nil end
+                local inventory = sourceInventory()
+                if inventory then
+                    if State.approved == nil and State.permissionCalls == 0 then State.approved = true end
+                    if State.approved == true then return inventory end
+                end
+                task.wait(0.2)
+            end
+            if State.active then stop("Inventory opening timed out", "fallback") end
+        end
+local categories = {"pets","food","pet_accessories","strollers","transport","vehicles","toys","gifts","stickers"}
+local function listInventory(inventory)
+    local result, seen, examined = {}, {}, 0
+    for _, category in ipairs(categories) do
+        local bucket = rawget(inventory, category)
+        if type(bucket) == "table" then
+            for key, raw in next, bucket do
+                examined += 1
+                if examined > 6000 then stop("Inventory exceeds bounded scan limit") return nil end
+                if type(raw) == "table" and type(raw.kind) == "string" then
+                    local item = shallowCopy(raw)
+                    item.category = item.category or category
+                    item.unique = item.unique or item.uid or (type(key) == "string" and key or nil)
+                    local uid = type(item.unique) == "string" and item.unique
+                    if uid and not seen[uid] then seen[uid] = true result[#result + 1] = item end
+                end
+                if examined % 40 == 0 then
+                    task.wait()
+                    if not State.active or not current() or not visibleTarget() then return nil end
+                end
+            end
+        end
+    end
+    State.scanned, State.snapshots = #result, State.snapshots + 1
+    return result
+end
+local function finite(value) return type(value) == "number" and value == value and value > 0 and value < math.huge end
+local function usable(item, incoming)
+    if type(item) ~= "table" or itemLocked(item) or isHardBlockedItem(item) then return nil end
+    if incoming then
+        if CommonPetFilter.isIgnoredIncomingEgg(item) or CommonPetFilter.shouldIgnoreIncoming(item) then return nil end
+    end
+    local effective = effectiveItemValue(item)
+    if not effective.known or effective.newIgnored or effective.estimated then return nil end
+    local data = effective.analysis
+    if not finite(data.value) or data.value < activeMinItemValue("theirs") or data.estimated or data.reason then return nil end
+    if data.isRealPet and data.demandStars == nil then return nil end
+    if not incoming and DemandPolicy.ownAnalysisReason(data) then return nil end
+    return data
+end
+local function candidates(items, theirs)
+    local present, result = {}, {}
+    for _, item in pairs(getOfferItems(theirs)) do present[tostring(itemUID(item))] = true end
+    for index, item in ipairs(items) do
+        if not State.active then return nil end
+        local uid = tostring(item.unique)
+        if not State.attempted[uid] and not present[uid] then
+            local data = usable(item, true)
+            if data and data.isRealPet then result[#result + 1] = {item = item, data = data, uid = uid} else State.skipped += 1 end
+        end
+        if index % 40 == 0 then task.wait() if not current() then return nil end end
+    end
+    table.sort(result, function(a, b)
+        if a.data.demandStars ~= b.data.demandStars then return a.data.demandStars > b.data.demandStars end
+        if a.data.value ~= b.data.value then return a.data.value > b.data.value end
+        return a.uid < b.uid
+    end)
+    return result
+end
+
+        local function main()
+            UIManager = UIManager or Fsys.load("UIManager")
+            local id, name = identity(partner)
+            State.target = (name and Players:FindFirstChild(name)) or (id and Players:GetPlayerByUserId(id))
+            if not State.target or State.target == LocalPlayer then stop("Partner unavailable", "fallback") return end
+            local observer = ENV.__AM_CHATINV_INSPECTOR_V1_SESSION
+            if type(observer) == "table" and type(observer.close) == "function" then pcall(observer.close) end
+            local helper = ENV.__AM_INVENTORY_REQUEST_HELPER_V1
+            if type(helper) == "table" and type(helper.stop) == "function" then pcall(helper.stop, "main analyzer started", true) end
+            installHook()
+            if not Hub.installed then stop("Permission observer unavailable: " .. S.hookStatus, "fallback") return end
+            Hub.capture = captureOutgoing
+            say("Requesting inventory from " .. State.target.Name)
+            if not openTarget() then return end
+            local inventory = waitInventory(60)
+            if not inventory then return end
+            say("Access granted | Demand priority 3 > 2 > 1")
+            while State.active and State.rounds < 4 do
+                State.phase = "analysis"
+                if not current() then stop("Trade closed, paused or partner changed") return end
+                if not visibleTarget() then
+                    if not openTarget() then return end
+                    inventory = waitInventory(12)
+                else inventory = sourceInventory() end
+                if not inventory then return end
+                local items = listInventory(inventory)
+                if not items then stop("Inventory changed during scan", "fallback") return end
+                local _, mine, theirs = current()
+                if not mine then stop("Trade changed") return end
+                if countOfferItems(theirs) >= 18 then stop("Partner offer is full") return end
+                local mineSignature, theirSignature = offerSignature(mine), offerSignature(theirs)
+                local choices = candidates(items, theirs)
+                if not choices or not current() then stop("Trade changed during analysis") return end
+                local selected = choices[1]
+                if not selected then stop("No eligible 3/2/1-star pets remain", State.rounds == 0 and "fallback" or nil) return end
+                local _, freshMine, freshTheirs = current()
+                if not freshMine or offerSignature(freshMine) ~= mineSignature or offerSignature(freshTheirs) ~= theirSignature then
+                    task.wait(0.2)
+                    continue
+                end
+                local latest = sourceInventory()
+                local bucket = latest and rawget(latest, selected.item.category)
+                local live
+                if type(bucket) == "table" then
+                    for key, raw in next, bucket do
+                        if type(raw) == "table" and tostring(raw.unique or raw.uid or key) == selected.uid then
+                            live = shallowCopy(raw) live.category = live.category or selected.item.category break
+                        end
+                    end
+                end
+                local liveData = live and usable(live, true)
+                if not liveData or getVariant(live) ~= selected.data.variant or liveData.demandStars ~= selected.data.demandStars then
+                    State.attempted[selected.uid] = true
+                    continue
+                end
+                if accepted(freshMine) or accepted(freshTheirs) then stop("Offer already accepted; finish current trade") return end
+                State.attempted[selected.uid], State.rounds, State.phase = true, State.rounds + 1, "waiting"
+                State.pending = selected.uid
+                MainState.acceptReadySignature, MainState.acceptReadySince = nil, nil
+                say("Suggest " .. liveData.name .. " " .. liveData.variant .. " | Demand " .. liveData.demandStars .. " | value " .. valueText(liveData.value))
+                local ok, result = remoteCall(TradeRemote.SuggestItem, selected.uid)
+                if not current() then return end
+                if not ok or result == false then stop("Suggest Item failed; no retry", "fallback") return end
+                local untilAt, added = os.clock() + Settings.addTimeout, false
+                while State.active and os.clock() < untilAt do
+                    local _, ownNow, theirNow = current()
+                    if not ownNow then return end
+                    if accepted(ownNow) or accepted(theirNow) then stop("Offer accepted; finish current trade") return end
+                    for _, item in pairs(getOfferItems(theirNow)) do if tostring(itemUID(item)) == selected.uid then added = true break end end
+                    if added then break end
+                    task.wait(0.2)
+                end
+                if not added then
+                    if State.active then
+                        stop("Player did not add suggested pet; finish inventory search")
+                        MainState.declineSent = true
+                        decline()
+                    end
+                    return
+                end
+                State.phase, State.pending = "balance", nil
+                MainState.optimizedSignature, MainState.acceptReadySignature, MainState.acceptReadySince = nil, nil, nil
+                say("Requested pet added | rebuilding our offer, then checking next Suggest")
+                while State.active do
+                    local _, ownNow, theirNow = current()
+                    if not ownNow then return end
+                    local stillPresent = false
+                    for _, item in pairs(getOfferItems(theirNow)) do if tostring(itemUID(item)) == selected.uid then stillPresent = true break end end
+                    if not stillPresent then stop("Requested pet removed; remaining offer will be re-evaluated") return end
+                    if accepted(ownNow) or accepted(theirNow) then stop("Offer accepted; finish current trade") return end
+                    local key = offerSignature(theirNow) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|ITEMWIN=" .. tostring(Settings.itemMinimumWinPercent)
+                    if MainState.optimizedSignature == key and os.clock() - (MainState.changedAt or os.clock()) >= Settings.settleSeconds then break end
+                    task.wait(0.2)
+                end
+                if not State.active then return end
+                task.wait(1)
+            end
+            if State.active then stop("Suggestion limit reached; review balanced offer") end
+        end
+        worker(function()
+            while State.active do
+                if State.approved == false then stop("Inventory access declined", "fallback") return end
+                if State.target and not current() then stop("Trade closed, paused or partner changed") return end
+                if os.clock() - (MainState.tradeStarted or os.clock()) > Settings.maxTradeSeconds then stop("Trade timeout") return end
+                task.wait(0.2)
+            end
+        end)
+        worker(main)
+    end
+    function InventoryFlow.step(trade, partner)
+        if not Settings.inventorySuggestions then InventoryFlow.stop("inventory suggestions disabled") return false end
+        if not AMVGG.ready or AMVGG.loading then setTestStatus("INVENTORY: WAIT AMVGG", C.YELLOW) return true end
+        local session = InventoryFlow.session
+        if not session or session.tradeID ~= MainState.tradeID then InventoryFlow.begin(trade, partner) session = InventoryFlow.session end
+        if session.active and session.phase ~= "balance" then
+            setTestStatus("INVENTORY " .. session.phase:upper() .. " | SUGGEST " .. session.rounds .. "/4", C.YELLOW)
+            return true
+        end
+        return false
+    end
+end
+
+
 local function manageAutoTrade(trade)
 
     local myOffer,
@@ -10712,6 +11126,11 @@ local function manageAutoTrade(trade)
                 partner
             )
         )
+
+    if playerName(partner) == LocalPlayer.Name or (State.tradeID == id and State.partner and playerName(State.partner) ~= playerName(partner)) then
+        InventoryFlow.stop("partner changed inside current trade")
+        return
+    end
 
     if
         State.tradeID
@@ -10882,6 +11301,11 @@ local function manageAutoTrade(trade)
     State.lastOurSignature =
         ourSignature
 
+    if InventoryFlow.step(trade, partner) then
+        unaccept(myOffer)
+        return
+    end
+
     local myCount =
         countOfferItems(
             myOffer
@@ -10894,7 +11318,7 @@ local function manageAutoTrade(trade)
 
     -- SHOW MOST EXPENSIVE SAFE ITEM, BUT DO NOT EXPOSE IT INSTANTLY.
     -- The countdown begins when the trade itself starts.
-    if myCount == 0 then
+    if myCount == 0 and not InventoryFlow.engaged() then
 
         local requiredShowcaseDelay =
             math.max(
@@ -11449,6 +11873,11 @@ local function manageAutoTrade(trade)
             optimizationSignature
     end
 
+    if InventoryFlow.holdAccept() then
+        setTestStatus("INVENTORY: BALANCED | CHECK NEXT SUGGEST", C.YELLOW)
+        return
+    end
+
     -- ACCEPT ONLY AFTER OUR OFFER WAS BALANCED
     -- and remained unchanged for PRE ACCEPT DELAY seconds.
     if evaluation.valid then
@@ -11581,9 +12010,9 @@ local function manageAutoTrade(trade)
         State.askSignature =
             theirSignature
 
-        sendChat(
-            "please add a little"
-        )
+        if not InventoryFlow.engaged() then
+            sendChat("please add a little")
+        end
 
         testLog(
             "ASK ADD",
@@ -12127,7 +12556,7 @@ testLog(
 testLog(
     "SUGGEST ITEM",
     TradeRemote.SuggestItem
-        and "FOUND / NOT USED YET"
+        and "READY / INVENTORY SUGGEST"
         or "MISS"
 )
 
@@ -12307,6 +12736,7 @@ task.spawn(
 
                         else
 
+                            InventoryFlow.stop("Auto Trade disabled")
                             setTestStatus(
                                 "OFF",
                                 C.MUTED
