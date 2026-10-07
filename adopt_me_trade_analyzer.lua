@@ -42,7 +42,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.32"
+    "11.7.36"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -1666,82 +1666,85 @@ then
 end
 
 
-local function httpGet(
-    url,
-    headers
-)
-
-    if type(REQUEST) == "function" then
-
-        local ok,
-            response =
-            pcall(
-                REQUEST,
-                {
-                    Url = url,
-                    URL = url,
-                    Method = "GET",
-                    Headers =
-                        headers
-                        or {},
-                }
-            )
-
-        if ok then
-
-            if
-                type(response)
-                == "string"
-            then
-
-                return
-                    response,
-                    200
-            end
-
-            if
-                type(response)
-                == "table"
-            then
-
-                return
-
-                    response.Body
-                    or response.body,
-
-                    tonumber(
-                        response.StatusCode
-                        or response.Status
-                        or response.status_code
-                    )
-                    or 0
-            end
+function Runtime.runBounded(fn, seconds, current)
+    local operation = {done=false, abandoned=false}
+    Runtime.boundedChildren = Runtime.boundedChildren or setmetatable({}, {__mode="k"})
+    local parent, thread = coroutine.running(), nil
+    local function unlink()
+        local siblings = parent and Runtime.boundedChildren[parent]
+        if siblings and thread then
+            siblings[thread] = nil
+            if next(siblings) == nil then Runtime.boundedChildren[parent] = nil end
         end
     end
-
-    local ok,
-        body =
-        pcall(
-            function()
-
-                return
-                    game:HttpGet(
-                        url,
-                        true
-                    )
-            end
-        )
-
-    if ok then
-
-        return
-            body,
-            200
+    local function invoke()
+        local result = table.pack(pcall(fn))
+        operation.done = true
+        if not operation.abandoned then operation.result = result end
+        unlink()
     end
+    if type(Runtime.task.spawn) == "function" then thread = Runtime.task.spawn(invoke)
+    else thread = coroutine.create(invoke) coroutine.resume(thread) end
+    if parent and type(thread) == "thread" and coroutine.status(thread) ~= "dead" then
+        local siblings = Runtime.boundedChildren[parent] or {}
+        Runtime.boundedChildren[parent] = siblings
+        siblings[thread] = true
+    end
+    local function abandon(reason)
+        operation.abandoned, operation.result = true, nil
+        if thread then Runtime.cancelBounded(thread) end
+        unlink()
+        return false, reason
+    end
+    local deadline = os.clock() + seconds
+    for _ = 1, math.ceil(seconds / .05) + 2 do
+        if not Runtime.alive() or (current and not current()) then return abandon("OPERATION CANCELLED") end
+        if operation.done then
+            unlink()
+            local result = operation.result
+            if not result then return false, "OPERATION CANCELLED" end
+            return table.unpack(result, 1, result.n)
+        end
+        if os.clock() >= deadline then return abandon("OPERATION TIMEOUT") end
+        Runtime.task.wait(.05)
+    end
+    return abandon("OPERATION TIMEOUT")
+end
 
-    return
-        nil,
-        0
+function Runtime.cancelBounded(thread)
+    local children = Runtime.boundedChildren and Runtime.boundedChildren[thread]
+    if children then
+        Runtime.boundedChildren[thread] = nil
+        for child in pairs(children) do Runtime.cancelBounded(child) end
+    end
+    if type(thread) == "thread" and coroutine.status(thread) ~= "dead" then
+        if type(Runtime.task.cancel) == "function" then pcall(Runtime.task.cancel, thread)
+        elseif type(coroutine.close) == "function" then pcall(coroutine.close, thread) end
+    end
+    if Runtime.jobs then Runtime.jobs[thread] = nil end
+end
+
+
+local function httpGet(url, headers)
+    local generation = Runtime.priceRefreshGeneration
+    local function current() return Runtime.priceRefreshGeneration == generation end
+    local ok, body, status = Runtime.runBounded(function()
+        if type(REQUEST) == "function" then
+            local requested, response = pcall(REQUEST, {Url=url, URL=url, Method="GET", Headers=headers or {}})
+            if not current() or not Runtime.alive() then return nil, 0 end
+            if requested then
+                if type(response) == "string" then return response, 200 end
+                if type(response) == "table" then
+                    return response.Body or response.body, tonumber(response.StatusCode or response.Status or response.status_code) or 0
+                end
+            end
+        end
+        if not current() or not Runtime.alive() then return nil, 0 end
+        return game:HttpGet(url, true), 200
+    end, 8, current)
+    if ok then return body, status or 0 end
+    Runtime.lastHTTPError = tostring(body)
+    return nil, 0
 end
 
 
@@ -2014,140 +2017,92 @@ local CATEGORY_URLS = {
 
 
 local function loadCategory(slug)
-
-    local token =
-        tostring(
-            os.time()
-        )
-        .. tostring(
-            math.random(
-                100000,
-                999999
-            )
-        )
-
+    local generation = Runtime.priceRefreshGeneration
+    local token = tostring(os.time()) .. tostring(math.random(100000, 999999))
     local attempts = {
-
-        {
-            url =
-                "https://amvgg.com/values/"
-                .. slug
-                .. "?_rsc="
-                .. token,
-
-            headers = {
-                ["RSC"] =
-                    "1",
-            },
-        },
-
-        {
-            url =
-                "https://amvgg.com/values/"
-                .. slug
-                .. "?v="
-                .. token,
-
-            headers =
-                {},
-        },
-
-        {
-            url =
-                "https://amvgg.com/values/"
-                .. slug,
-
-            headers =
-                {},
-        },
+        {url="https://amvgg.com/values/" .. slug .. "?_rsc=" .. token, headers={RSC="1"}},
+        {url="https://amvgg.com/values/" .. slug .. "?v=" .. token, headers={}},
+        {url="https://amvgg.com/values/" .. slug, headers={}},
     }
-
-    local bestDatabase =
-        {}
-
-    local bestCount =
-        0
-
-    local lastStatus =
-        0
-
-    for _,
-        attempt in ipairs(
-            attempts
-        )
-    do
-
-        local body,
-            status =
-            httpGet(
-                attempt.url,
-                attempt.headers
-            )
-
-        lastStatus =
-            status
-
-        if
-            status >= 200
-            and status < 400
-            and type(body)
-                == "string"
-        then
-
-            local database,
-                count =
-                parseBody(
-                    body
-                )
-
-            if count > bestCount and Runtime.catalogComplete(slug, database, count) then
-
-                bestDatabase =
-                    database
-
-                bestCount =
-                    count
+    local evidence, lastStatus = {}, 0
+    for _, attempt in ipairs(attempts) do
+        if not Runtime.alive() or Runtime.priceRefreshGeneration ~= generation then return {}, 0, lastStatus end
+        local body, status = httpGet(attempt.url, attempt.headers)
+        if not Runtime.alive() or Runtime.priceRefreshGeneration ~= generation then return {}, 0, status end
+        lastStatus = status
+        if status == 429 then return {}, 0, status end
+        if status >= 200 and status < 400 and type(body) == "string" then
+            local database, count = parseBody(body)
+            local fingerprint = Runtime.catalogFingerprint(slug, database, count)
+            if fingerprint then
+                evidence[fingerprint] = (evidence[fingerprint] or 0) + 1
+                Runtime.catalogVerified[database] = {slug=slug, fingerprint=fingerprint, sources=evidence[fingerprint]}
+                -- Unchanged full coverage needs one response. A changed catalog
+                -- still needs matching independent response formats.
+                if Runtime.catalogComplete(slug, database, count) then return database, count, status end
             end
-
-            -- Read all supported response formats; a tiny partial result is not completion.
         end
-
-        Runtime.task.wait(
-            0.12
-        )
+        Runtime.task.wait(.12)
     end
-
-    return
-        bestDatabase,
-        bestCount,
-        lastStatus
+    return {}, 0, lastStatus
 end
 
 
 local function refresh()
-    if AMVGG.loading or not Runtime.alive() then return false end
+    if not Runtime.alive() then return false end
+    if AMVGG.loading then
+        local started = Runtime.priceRefreshStarted
+        if not started or os.clock() - started < 125 then return false end
+        Runtime.priceRefreshGeneration = (Runtime.priceRefreshGeneration or 0) + 1
+        AMVGG.loading, AMVGG.dataStale = false, true
+    end
+    Runtime.priceRefreshGeneration = (Runtime.priceRefreshGeneration or 0) + 1
+    local generation = Runtime.priceRefreshGeneration
+    Runtime.priceRefreshStarted, Runtime.lastHTTPError = os.clock(), nil
     AMVGG.loading = true
-    local ok, snapshot, failure = pcall(function()
+    local workers = {}
+    local function current() return Runtime.priceRefreshGeneration == generation end
+    local ok, snapshot, failure = Runtime.runBounded(function()
         local categories, counts, total, failed = {}, {}, 0, {}
-        for _, slug in ipairs(CATEGORY_URLS) do
-            local database, count, status = loadCategory(slug)
-            if not Runtime.alive() then return nil, "SESSION STOPPED" end
-            if not Runtime.catalogComplete(slug, database, count) then
-                failed[#failed + 1] = slug .. "(" .. tostring(status) .. ")"
-            else
-                categories[slug], counts[slug] = database, count
-                total += count
+        local nextIndex, completed = 0, 0
+        local function worker()
+            while Runtime.alive() and current() do
+                nextIndex += 1
+                local slug = CATEGORY_URLS[nextIndex]
+                if not slug then return end
+                local loaded, database, count, status = pcall(loadCategory, slug)
+                if not Runtime.alive() or not current() then return end
+                if not loaded or not Runtime.catalogComplete(slug, database, count) then
+                    failed[#failed + 1] = slug .. "(" .. tostring(loaded and status or database) .. ")"
+                else
+                    categories[slug], counts[slug] = database, count
+                    total += count
+                end
+                completed += 1
+                Runtime.task.wait()
             end
-            Runtime.task.wait()
         end
-        -- Commit a complete snapshot atomically. A partial update must not
-        -- erase good categories or mix price generations in one decision.
-        if #failed > 0 or total <= 0 then
-            return nil, "REFRESH FAILED: " .. table.concat(failed, ", ")
+        if type(Runtime.task.spawn) == "function" then
+            for _ = 1, math.min(3, #CATEGORY_URLS) do workers[#workers + 1] = Runtime.task.spawn(worker) end
+            while completed < #CATEGORY_URLS and Runtime.alive() and current() do Runtime.task.wait(.05) end
+        else
+            worker()
         end
-        return {categories = categories, counts = counts, total = total}
-    end)
-    AMVGG.loading = false
+        if not Runtime.alive() or not current() then return nil, "SESSION STOPPED" end
+        if completed ~= #CATEGORY_URLS or #failed > 0 or total <= 0 then
+            return nil, "REFRESH FAILED: " .. table.concat(failed, ", ") .. (Runtime.lastHTTPError and " | " .. Runtime.lastHTTPError or "")
+        end
+        return {categories=categories, counts=counts, total=total}
+    end, 120, current)
+    local owns = current()
+    -- Close the generation before cancelling workers. Any uncancellable late
+    -- response is discarded and cannot start another request or commit prices.
+    if owns then Runtime.priceRefreshGeneration = generation + 1 end
+    for _, thread in ipairs(workers) do
+        Runtime.cancelBounded(thread)
+    end
+    if not owns then return false end
+    AMVGG.loading, Runtime.priceRefreshStarted = false, nil
     if not Runtime.alive() then return false end
     if not ok or not snapshot then
         AMVGG.error = tostring(ok and failure or snapshot)
@@ -2202,20 +2157,42 @@ end
 -- Read-only baseline verified against all ten public AMVGG catalogs on 2026-10-06.
 Runtime.catalogMinimum = {pets=786, eggs=44, petwear=237, strollers=35, food=51,
     vehicles=199, toys=93, gifts=32, stickers=71, houses=37}
+Runtime.catalogVerified = setmetatable({}, {__mode="k"})
+function Runtime.catalogFingerprint(slug, database, count)
+    if type(database) ~= "table" or not num(count) or count % 1 ~= 0 then return nil end
+    local identities, seen, actual = {}, {}, 0
+    for key, entry in pairs(database) do
+        if type(entry) ~= "table" or type(entry.name) ~= "string" or entry.__ambiguous then return nil end
+        local identity = entry.id ~= nil and "id:" .. tostring(entry.id) or "name:" .. tostring(key)
+        if seen[identity] then return nil end
+        seen[identity], actual = true, actual + 1
+        identities[#identities + 1] = identity
+    end
+    -- A small catalog edit is allowed only with corroboration below. Large
+    -- drops still require an updated verified baseline, never blind acceptance.
+    local floor = math.max(1, math.floor((Runtime.catalogMinimum[slug] or 1) * .9), math.floor(((AMVGG.counts or {})[slug] or 0) * .9))
+    if actual ~= count or count < floor then return nil end
+    table.sort(identities)
+    return table.concat(identities, "|")
+end
+
 function Runtime.catalogComplete(slug, database, count)
-    if type(database) ~= "table" or not num(count) or count % 1 ~= 0 then return false end
-    local actual = 0
-    for _, entry in pairs(database) do
-        if type(entry) ~= "table" or type(entry.name) ~= "string" or entry.__ambiguous then return false end
-        actual += 1
+    local fingerprint = Runtime.catalogFingerprint(slug, database, count)
+    if not fingerprint then return false end
+    local byID = {}
+    for _, entry in pairs(database) do if entry.id ~= nil then byID[tostring(entry.id)] = true end end
+    local old = AMVGG.categories[slug] or {}
+    local changed = count < math.max(Runtime.catalogMinimum[slug] or 1, (AMVGG.counts or {})[slug] or 0)
+    for key, previous in pairs(old) do
+        if previous.id ~= nil then
+            if not byID[tostring(previous.id)] then changed = true end
+        elseif not database[key] then
+            return false -- without a stable ID, keep the strict coverage rule
+        end
     end
-    if count ~= actual or count < math.max(1, Runtime.catalogMinimum[slug] or 1, (AMVGG.counts or {})[slug] or 0) then return false end
-    -- A partial response must not silently erase previously verified cards.
-    for key, previous in pairs(AMVGG.categories[slug] or {}) do
-        local entry = database[key]
-        if not entry or (previous.id ~= nil and tostring(previous.id) ~= tostring(entry.id)) then return false end
-    end
-    return true
+    if not changed then return true end -- renaming with the same ID is safe
+    local verified = Runtime.catalogVerified[database]
+    return verified ~= nil and verified.slug == slug and verified.fingerprint == fingerprint and verified.sources >= 2
 end
 
 
@@ -2949,6 +2926,8 @@ local FIRST_SEEN_FILE =
 
 local Settings = {
 
+    ownPotionsOnly = false,
+
     autoTrade =
         false,
 
@@ -3375,7 +3354,7 @@ function Runtime.policySignature()
     local keys = {
         "allowedItems", "minValueMode", "allMinItemValue", "myMinItemValue", "theirMinItemValue",
         "itemMinimumWinPercent", "newItemHours", "blockEstimated", "allowEstimatedOwnPets",
-        "excludeUnwantedIncomingNoPotion", "minProfitPercent", "maxOurItems", "optimizerBeam",
+        "excludeUnwantedIncomingNoPotion", "minProfitPercent", "maxOurItems", "optimizerBeam", "ownPotionsOnly",
     }
     local values = {}
     for _, key in ipairs(keys) do values[#values + 1] = key .. "=" .. tostring(Settings[key]) end
@@ -3383,6 +3362,7 @@ function Runtime.policySignature()
 end
 
 function Runtime.disableAutomation()
+    Runtime.potionAddonPlan = nil
     AutoTradeGeneration += 1
     if Runtime.flow then Runtime.flow.stop("Auto Trade disabled") end
     local state = Runtime.state
@@ -3711,70 +3691,34 @@ end
 -- PLAYER HELPERS
 --============================================================
 
-local function playerName(value)
-
+function Runtime.playerID(value)
+    local id
     if typeof(value) == "Instance" then
-        return value.Name
+        local ok, result = pcall(function() return value.UserId end)
+        if ok then id = result end
+    elseif type(value) == "table" then
+        id = value.UserId or value.userId or value.user_id or value.id
+    elseif type(value) == "number" or type(value) == "string" then
+        id = value
     end
-
-    if type(value) == "table" then
-
-        return
-            tostring(
-                value.name
-                or value.username
-                or value.player_name
-                or value
-            )
-    end
-
-    return
-        tostring(
-            value
-            or "Unknown"
-        )
+    id = num(id)
+    if id and id > 0 and id % 1 == 0 then return id end
 end
 
+local function playerName(value)
+    if typeof(value) == "Instance" then return tostring(value.Name) end
+    if type(value) == "table" then
+        return tostring(value.Name or value.name or value.username or value.player_name or Runtime.playerID(value) or "Unknown")
+    end
+    return tostring(value or "Unknown")
+end
 
 local function isMe(value)
-
-    if value == LocalPlayer then
-        return true
-    end
-
-    if type(value) == "number" then
-
-        return
-            value
-            == LocalPlayer.UserId
-    end
-
-    if type(value) == "table" then
-
-        local id =
-            tonumber(
-                value.user_id
-                or value.userId
-                or value.id
-            )
-
-        if id then
-
-            return
-                id
-                == LocalPlayer.UserId
-        end
-    end
-
-    return
-
-        playerName(value):
-        lower()
-
-        ==
-
-        LocalPlayer.Name:
-        lower()
+    if value == LocalPlayer then return true end
+    local id = Runtime.playerID(value)
+    if id then return id == LocalPlayer.UserId end
+    if type(value) == "table" and (value.UserId ~= nil or value.userId ~= nil or value.user_id ~= nil or value.id ~= nil) then return false end
+    return playerName(value):lower() == LocalPlayer.Name:lower()
 end
 
 
@@ -4011,12 +3955,8 @@ end
 --============================================================
 
 function Runtime.partnerKey(partner)
-    if typeof(partner) == "Instance" then return "id:" .. tostring(partner.UserId) end
-    if type(partner) == "number" then return "id:" .. tostring(partner) end
-    if type(partner) == "table" then
-        local id = partner.user_id or partner.userId or partner.UserId or partner.id
-        if id ~= nil then return "id:" .. tostring(id) end
-    end
+    local id = Runtime.playerID(partner)
+    if id then return "id:" .. tostring(id) end
     return "name:" .. playerName(partner):lower()
 end
 
@@ -4057,6 +3997,7 @@ end
 
 function Runtime.optimizationKey(theirOffer)
     return offerSignature(theirOffer) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|POLICY=" .. Runtime.policySignature()
+        .. "|INVENTORY=" .. Runtime.inventorySignature()
 end
 
 
@@ -4502,74 +4443,39 @@ local function resolveRemote(list)
 end
 
 
-local TradeRemote =
-    {}
+local TradeRemote = {}
+Runtime.tradeRemoteNames = {
+    SendRequest = {"TradeAPI/SendTradeRequest", "TradeAPI/BeginTrade", "TradeAPI/RequestTrade"},
+    Add = {"TradeAPI/AddItemToOffer", "TradeAPI/AddItem"},
+    Remove = {"TradeAPI/RemoveItemFromOffer", "TradeAPI/RemoveItem"},
+    Accept = {"TradeAPI/AcceptNegotiation", "TradeAPI/AcceptTrade"},
+    Unaccept = {"TradeAPI/UnacceptNegotiation", "TradeAPI/UnacceptTrade"},
+    Confirm = {"TradeAPI/ConfirmTrade"},
+    Decline = {"TradeAPI/DeclineTrade", "TradeAPI/CancelTrade"},
+    QuickChat = {"TradeAPI/SendQuickChat"},
+}
+Runtime.tradeRemoteRetryAt = {}
+function Runtime.resolveTradeRemote(operation)
+    local names = Runtime.tradeRemoteNames[operation]
+    if not names then return nil end
+    local existing = rawget(TradeRemote, operation)
+    if existing then return existing end
+    local now = os.clock()
+    if now < (Runtime.tradeRemoteRetryAt[operation] or 0) then return nil end
+    Runtime.tradeRemoteRetryAt[operation] = now + 1
+    local remote, name = resolveRemote(names)
+    if remote then
+        rawset(TradeRemote, operation, remote)
+        rawset(TradeRemote, operation .. "Name", name)
+        Runtime.tradeRemoteRetryAt[operation] = nil
+    end
+    return remote
+end
+setmetatable(TradeRemote, {__index = function(_, key)
+    if Runtime.tradeRemoteNames[key] then return Runtime.resolveTradeRemote(key) end
+end})
+for operation in pairs(Runtime.tradeRemoteNames) do Runtime.resolveTradeRemote(operation) end
 
-
-TradeRemote.SendRequest,
-TradeRemote.SendRequestName =
-    resolveRemote({
-
-        "TradeAPI/SendTradeRequest",
-        "TradeAPI/BeginTrade",
-        "TradeAPI/RequestTrade",
-    })
-
-
-TradeRemote.Add,
-TradeRemote.AddName =
-    resolveRemote({
-
-        "TradeAPI/AddItemToOffer",
-        "TradeAPI/AddItem",
-    })
-
-
-TradeRemote.Remove,
-TradeRemote.RemoveName =
-    resolveRemote({
-
-        "TradeAPI/RemoveItemFromOffer",
-        "TradeAPI/RemoveItem",
-    })
-
-
-TradeRemote.Accept,
-TradeRemote.AcceptName =
-    resolveRemote({
-
-        "TradeAPI/AcceptNegotiation",
-        "TradeAPI/AcceptTrade",
-    })
-
-
-TradeRemote.Unaccept,
-TradeRemote.UnacceptName =
-    resolveRemote({
-
-        "TradeAPI/UnacceptNegotiation",
-        "TradeAPI/UnacceptTrade",
-    })
-
-
-TradeRemote.Confirm,
-TradeRemote.ConfirmName =
-    resolveRemote({
-
-        "TradeAPI/ConfirmTrade",
-    })
-
-
-TradeRemote.Decline,
-TradeRemote.DeclineName =
-    resolveRemote({
-
-        "TradeAPI/DeclineTrade",
-        "TradeAPI/CancelTrade",
-    })
-
-
-TradeRemote.QuickChat, TradeRemote.QuickChatName = resolveRemote({"TradeAPI/SendQuickChat"})
 
 local function remoteCall(remote, ...)
     if not remote then return false, "REMOTE MISSING" end
@@ -4812,6 +4718,22 @@ end
 -- ALLOWED ITEMS
 --============================================================
 
+function Runtime.inventorySignature()
+    local now = os.clock()
+    if Runtime.inventorySignatureAt and now - Runtime.inventorySignatureAt < .5 then
+        return Runtime.inventorySignatureValue
+    end
+    local signatures = {}
+    for _, item in ipairs(inventoryItems()) do
+        signatures[#signatures + 1] = string.format("%q:%q:%q:%q",
+            tostring(itemUID(item)), tostring(item.kind), tostring(item.category), tostring(getVariant(item)))
+    end
+    table.sort(signatures)
+    Runtime.inventorySignatureAt, Runtime.inventorySignatureValue = now, table.concat(signatures, "|")
+    return Runtime.inventorySignatureValue
+end
+
+
 local function parseAllowed()
 
     local text =
@@ -4853,7 +4775,41 @@ local function parseAllowed()
 end
 
 
-local function isAllowed(name)
+function Runtime.isTradePotion(name)
+    local key = normalize(name)
+    return key == normalize("Ride-A-Pet Potion") or key == normalize("Fly-A-Pet Potion")
+end
+
+function Runtime.potionItemKey(item)
+    return tostring(itemUID(item)) .. ":" .. tostring(item.kind) .. ":" .. tostring(item.category) .. ":" .. getVariant(item)
+end
+
+function Runtime.potionAddonAllowed(item)
+    local plan = Runtime.potionAddonPlan
+    if not item or not plan or Settings.ownPotionsOnly ~= true then return false end
+    if not Runtime.liveContext(plan.context, false, true) then return false end
+    return plan.addons[tostring(itemUID(item))] == Runtime.potionItemKey(item)
+end
+
+function Runtime.potionBasePresent(offer)
+    local plan = Runtime.potionAddonPlan
+    if not plan or not Runtime.liveContext(plan.context, false, true) then return false end
+    local present = {}
+    for _, item in pairs(getOfferItems(offer)) do present[tostring(itemUID(item))] = Runtime.potionItemKey(item) end
+    local count = 0
+    for uid, signature in pairs(plan.base) do
+        count += 1
+        if present[uid] ~= signature then return false end
+    end
+    return count > 0
+end
+
+local function isAllowed(name, item, selectingAddons)
+
+    if Settings.ownPotionsOnly == true and not Runtime.isTradePotion(name)
+        and selectingAddons ~= true and not Runtime.potionAddonAllowed(item) then
+        return false
+    end
 
     if HARD_BLOCKED_ITEMS[normalize(name)] then
         return false
@@ -4877,7 +4833,7 @@ local function isAllowed(name)
 end
 
 
-local function valuedInventory()
+local function valuedInventory(selectingAddons)
 
     local result =
         {}
@@ -4931,9 +4887,7 @@ local function valuedInventory()
             )
             and DemandPolicy.ownAnalysisReason(data.analysis) == nil
 
-            and isAllowed(
-                data.name
-            )
+            and isAllowed(data.name, item, selectingAddons)
         then
 
             result[
@@ -5005,7 +4959,7 @@ end
 --============================================================
 
 local function optimizeOurOffer(
-    theirEffectiveTotal
+    theirEffectiveTotal, suppliedCandidates, suppliedSlots
 )
     -- Per-item demand/item rules already include the required win.
     local cap = tonumber(theirEffectiveTotal) or 0
@@ -5020,8 +4974,7 @@ local function optimizeOurOffer(
             cap
     end
 
-    local all =
-        valuedInventory()
+    local all = suppliedCandidates or valuedInventory()
 
     local candidates =
         {}
@@ -5098,17 +5051,7 @@ local function optimizeOurOffer(
             )
         )
 
-    local maxItems =
-        math.clamp(
-            math.floor(
-                tonumber(
-                    Settings.maxOurItems
-                )
-                or 18
-            ),
-            1,
-            18
-        )
+    local maxItems = math.clamp(math.floor(tonumber(suppliedSlots or Settings.maxOurItems) or 18), 1, 18)
 
     for candidateIndex,
         candidate in ipairs(
@@ -5297,6 +5240,48 @@ end
 -- OFFER CONTROL
 --============================================================
 
+function Runtime.optimizeOwnOffer(cap)
+    Runtime.potionAddonPlan = nil
+    if not Settings.ownPotionsOnly then return optimizeOurOffer(cap) end
+    local context = Runtime.captureTrade(getTrade())
+    if not Runtime.liveContext(context, true, true) then return {}, 0, cap, "TRADE_CHANGED" end
+    local potions = {}
+    for _, candidate in ipairs(valuedInventory()) do
+        if Runtime.isTradePotion(candidate.name) then potions[#potions + 1] = candidate end
+    end
+    -- Potion selection always comes first. Never replace a potion with a pet.
+    local base, total, _, failure = optimizeOurOffer(cap, potions)
+    if failure or not Runtime.liveContext(context, true, true) then return {}, 0, cap, failure or "TRADE_CHANGED" end
+    if #base == 0 then return base, total, cap end
+    local slots = math.clamp(math.floor(tonumber(Settings.maxOurItems) or 18), 1, 18) - #base
+    local remaining = cap - total
+    if slots <= 0 or remaining <= 0.000000001 then return base, total, cap end
+    local used = {}
+    for _, candidate in ipairs(base) do used[candidate.uid] = true end
+    for _, candidate in ipairs(potions) do
+        if not used[candidate.uid] and candidate.value <= remaining + 0.000000001 then
+            -- If the bounded search left a potion that still fits, no pet fallback.
+            return base, total, cap
+        end
+    end
+    local fillers = {}
+    for _, candidate in ipairs(valuedInventory(true)) do
+        if not Runtime.isTradePotion(candidate.name) then fillers[#fillers + 1] = candidate end
+    end
+    local adds, addValue, _, addFailure = optimizeOurOffer(remaining, fillers, slots)
+    if addFailure or not Runtime.liveContext(context, true, true) then return {}, 0, cap, addFailure or "TRADE_CHANGED" end
+    if #adds == 0 then return base, total, cap end
+    local plan = {context=context, base={}, addons={}}
+    for _, candidate in ipairs(base) do plan.base[candidate.uid] = Runtime.potionItemKey(candidate.item) end
+    for _, candidate in ipairs(adds) do
+        plan.addons[candidate.uid] = Runtime.potionItemKey(candidate.item)
+        base[#base + 1] = candidate
+    end
+    Runtime.potionAddonPlan = plan
+    return base, total + addValue, cap
+end
+
+
 local function addOurItem(uid)
 
     if not TradeRemote.Add then
@@ -5310,7 +5295,11 @@ local function addOurItem(uid)
     for _, item in ipairs(inventoryItems()) do
         if tostring(itemUID(item)) == tostring(uid) then
             local data = effectiveItemValue(item)
-            if not isAllowed(data.name) then return false, "OUR ITEM NOT ALLOWED" end
+            if not isAllowed(data.name, item) then return false, "OUR ITEM NOT ALLOWED" end
+            if Settings.ownPotionsOnly and not Runtime.isTradePotion(data.name) then
+                local mine = getTradeSides(getTrade())
+                if not Runtime.potionBasePresent(mine) then return false, "POTION BASE MISSING" end
+            end
             if not data.known or data.newIgnored or data.estimated or data.value <= 0 then return false, "EXACT SAFE VALUE REQUIRED" end
             if data.value < activeMinItemValue("mine") and not CommonPetFilter.shouldBypassOurMinimum(item) then return false, "OUR ITEM < MIN VALUE" end
             local reason = DemandPolicy.ownItemReason(item)
@@ -5378,17 +5367,7 @@ end
 
 
 local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
-    local function partnerKey(partner)
-        if typeof(partner) == "Instance" then
-            return "id:" .. tostring(partner.UserId)
-        end
-        if type(partner) == "number" then return "id:" .. tostring(partner) end
-        if type(partner) == "table" then
-            local id = partner.user_id or partner.userId or partner.id
-            if id ~= nil then return "id:" .. tostring(id) end
-        end
-        return "name:" .. playerName(partner):lower()
-    end
+    local partnerKey = Runtime.partnerKey
 
     local initial = getTrade()
     local initialMine, initialTheirs, _, initialPartner = getTradeSides(initial)
@@ -5436,7 +5415,7 @@ local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
         if reason then return false, reason end
     end
     for _, candidate in ipairs(desired) do
-        if not isAllowed(effectiveItemValue(candidate.item).name) then return false, "OUR ITEM NOT ALLOWED" end
+        if not isAllowed(effectiveItemValue(candidate.item).name, candidate.item) then return false, "OUR ITEM NOT ALLOWED" end
         reason = DemandPolicy.ownItemReason(candidate.item)
         if reason then return false, reason end
     end
@@ -5513,44 +5492,30 @@ end
 --============================================================
 
 local function sendChat(text)
-
-    if not Settings.chatRequests then
-        return false
+    if not Settings.chatRequests or not Runtime.alive() then return false end
+    local generation, auto = AutoTradeGeneration, Settings.autoTrade
+    local trade = getTrade()
+    local context = trade and Runtime.captureTrade(trade)
+    local function current()
+        return Runtime.alive() and Settings.chatRequests
+            and AutoTradeGeneration == generation and Settings.autoTrade == auto
+            and (not context or Runtime.liveContext(context, false, false) ~= nil)
     end
-
-    local sent =
-        false
-
-    pcall(
-        function()
-
-            local channels =
-                TextChatService:
-                FindFirstChild(
-                    "TextChannels"
-                )
-
-            local general =
-                channels
-                and channels:
-                FindFirstChild(
-                    "RBXGeneral"
-                )
-
-            if general then
-
-                general:
-                SendAsync(
-                    text
-                )
-
-                sent =
-                    true
-            end
-        end
-    )
-
-    return sent
+    local ok, message = Runtime.runBounded(function()
+        local channels = TextChatService:FindFirstChild("TextChannels")
+        local general = channels and channels:FindFirstChild("RBXGeneral")
+        if not general or not current() then return nil end
+        return general:SendAsync(text)
+    end, 3, current)
+    if not ok then Runtime.lastChatError = tostring(message) return false, Runtime.lastChatError end
+    if not current() then Runtime.lastChatError = "CHAT CANCELLED" return false, Runtime.lastChatError end
+    local statusOK, status = pcall(function() return message and message.Status end)
+    if statusOK and status == Enum.TextChatMessageStatus.Success then
+        Runtime.lastChatError = nil
+        return true
+    end
+    Runtime.lastChatError = statusOK and tostring(status or "CHAT UNAVAILABLE") or "CHAT STATUS UNAVAILABLE"
+    return false, Runtime.lastChatError
 end
 
 
@@ -6974,7 +6939,7 @@ local function bindNumber(
         function()
 
             local value =
-                tonumber(
+                num(
                     input.Text
                 )
 
@@ -7650,6 +7615,22 @@ do
     bindNumber(ItemMinimumWinInput, "itemMinimumWinPercent", 0, 500)
 end
 
+do
+    local OwnPotionsToggle = button(TestCanvas, "", UDim2.new(1,-24,0,36), UDim2.fromOffset(10,1564))
+    local function renderOwnPotions()
+        OwnPotionsToggle.Text = "OUR OFFER: RIDE / FLY FIRST + ADDS: " .. (Settings.ownPotionsOnly and "ON" or "OFF")
+        OwnPotionsToggle.BackgroundColor3 = Settings.ownPotionsOnly and Color3.fromRGB(40,105,70) or C.PANEL2
+    end
+    Runtime.connect(OwnPotionsToggle.Activated, function()
+        Settings.ownPotionsOnly = not Settings.ownPotionsOnly
+        saveSettings()
+        renderOwnPotions()
+        -- policySignature invalidates in-flight selection and acceptance.
+        -- Approved fillers only complete a potion base within the demand cap.
+    end)
+    renderOwnPotions()
+end
+
 local function setTestStatus(
     text,
     color
@@ -8132,88 +8113,39 @@ local function plazaNameScore(name)
 end
 
 
-local function decodeHTTPJSON(url)
-
-    local body =
-        nil
-
-    -- Delta/executors can block game:HttpGet for Roblox API domains while
-    -- request/http_request still works. Prefer the already detected REQUEST.
-    if type(REQUEST) == "function" then
-
-        local ok,
-            response =
-            pcall(
-                REQUEST,
-                {
-                    Url = url,
-                    URL = url,
-                    Method = "GET",
-                    Headers = {
-                        ["Accept"] = "application/json",
-                        ["Cache-Control"] = "no-cache",
-                        ["User-Agent"] = "Mozilla/5.0",
-                    },
-                }
-            )
-
-        if ok then
-            if type(response) == "string" then
-                body = response
-            elseif type(response) == "table" then
-                body =
-                    response.Body
-                    or response.body
-            end
-        end
-    end
-
-    if type(body) ~= "string" then
-
-        local ok,
-            result =
-            pcall(
-                function()
-                    return
-                        game:HttpGet(
-                            url,
-                            true
-                        )
-                end
-            )
-
-        if ok and type(result) == "string" then
-            body = result
-        end
-    end
-
-    if type(body) ~= "string" then
-        return nil
-    end
-
-    local decoded
-
-    local decodeOK =
-        pcall(
-            function()
-                decoded =
-                    HttpService:
-                    JSONDecode(
-                        body
-                    )
-            end
-        )
-
-    if
-        not decodeOK
-        or type(decoded)
-            ~= "table"
-    then
-        return nil
-    end
-
-    return decoded
+function PlazaRouter.operationCurrent(generation)
+    return Runtime.alive() and Gui.Parent ~= nil and Settings.plazaAutoRoute
+        and (generation == nil or generation == (PlazaRouter.operationGeneration or 0))
 end
+
+local function decodeHTTPJSON(url)
+    local generation = PlazaRouter.operationGeneration or 0
+    local function current() return PlazaRouter.operationCurrent(generation) end
+    local ok, body = Runtime.runBounded(function()
+        if type(REQUEST) == "function" then
+            local requested, response = pcall(REQUEST, {
+                Url=url, URL=url, Method="GET",
+                Headers={Accept="application/json", ["Cache-Control"]="no-cache", ["User-Agent"]="Mozilla/5.0"},
+            })
+            if not current() then return nil end
+            if requested then
+                if type(response) == "string" then return response end
+                if type(response) == "table" then
+                    local status = tonumber(response.StatusCode or response.Status or response.status_code) or 200
+                    if status < 200 or status >= 400 then return nil end
+                    local data = response.Body or response.body
+                    if type(data) == "string" then return data end
+                end
+            end
+        end
+        if not current() then return nil end
+        return game:HttpGet(url, true)
+    end, 8, current)
+    if not ok or not current() or type(body) ~= "string" then return nil end
+    local decodedOK, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+    if decodedOK and current() and type(decoded) == "table" then return decoded end
+end
+
 
 local function getUniversePlacesForPlaza()
 
@@ -8274,36 +8206,12 @@ end
 
 
 local function getCurrentPlaceName()
-
-    local ok,
-        info =
-        pcall(
-            function()
-
-                return
-                    MarketplaceService:
-                    GetProductInfo(
-                        game.PlaceId
-                    )
-            end
-        )
-
-    if
-        ok
-        and type(info)
-            == "table"
-    then
-
-        return
-            tostring(
-                info.Name
-                or ""
-            )
-    end
-
+    local generation = PlazaRouter.operationGeneration or 0
+    local function current() return PlazaRouter.operationCurrent(generation) end
+    local ok, info = Runtime.runBounded(function() return MarketplaceService:GetProductInfo(game.PlaceId) end, 5, current)
+    if ok and current() and type(info) == "table" then return tostring(info.Name or "") end
     return ""
 end
-
 
 local function discoverTradingPlazaPlaces()
 
@@ -8585,6 +8493,8 @@ end
 
 local function findNewPlazaServer(placeId)
 
+    local generation = PlazaRouter.operationGeneration or 0
+
     local database =
         loadPlazaDatabase()
 
@@ -8596,6 +8506,8 @@ local function findNewPlazaServer(placeId)
         getPlazaServers(
             placeId
         )
+
+    if not PlazaRouter.operationCurrent(generation) then return nil end
 
     shufflePlazaList(
         servers
@@ -8708,6 +8620,24 @@ local function releasePlazaReservation(target)
     end
 end
 
+function PlazaRouter.runOperation(fn)
+    PlazaRouter.operationGeneration = (PlazaRouter.operationGeneration or 0) + 1
+    local generation = PlazaRouter.operationGeneration
+    local function current() return PlazaRouter.operationCurrent(generation) end
+    local ok, result = Runtime.runBounded(fn, 30, current)
+    if PlazaRouter.operationGeneration ~= generation then return false, "ROUTER CANCELLED" end
+    PlazaRouter.operationGeneration = generation + 1
+    if not ok then
+        local target = PlazaRouter.preparedTarget
+        PlazaRouter.preparedTarget = nil
+        releasePlazaReservation(target)
+        PlazaRouter.preparing, PlazaRouter.readyForTrading, PlazaRouter.clearSince = false, true, nil
+        PlazaRouter.retryAt = os.clock() + PLAZA_HOP_SETTINGS.RetrySeconds
+    end
+    return ok, result
+end
+
+
 local function teleportFailed(reason)
     local pending = PlazaRouter.pendingTeleport
     if not pending then return end
@@ -8759,6 +8689,8 @@ end
 
 local function routeNormalServerToPlaza()
 
+    local generation = PlazaRouter.operationGeneration or 0
+
     local currentPlaceId =
         tonumber(
             game.PlaceId
@@ -8791,6 +8723,8 @@ local function routeNormalServerToPlaza()
 
     local plazaPlaces =
         discoverTradingPlazaPlaces()
+
+    if not PlazaRouter.operationCurrent(generation) then return false end
 
     PlazaRouter.plazaPlaces =
         plazaPlaces
@@ -8844,6 +8778,8 @@ local function routeNormalServerToPlaza()
 
         local currentName =
             getCurrentPlaceName()
+
+        if not PlazaRouter.operationCurrent(generation) then return false end
 
         if
             plazaNameScore(
@@ -8945,7 +8881,7 @@ local function hopCurrentTradingPlaza()
     if not plazaTradeClear() then return false end
     local placeId = tonumber(PlazaRouter.currentPlazaPlaceId) or tonumber(game.PlaceId)
     if not placeId then PlazaRouter.preparing = false return false end
-    local ok, target = pcall(findNewPlazaServer, placeId)
+    local ok, target = PlazaRouter.runOperation(function() return findNewPlazaServer(placeId) end)
     if not ok or not target then
         PlazaRouter.preparing = false
         PlazaRouter.retryAt = os.clock() + PLAZA_HOP_SETTINGS.RetrySeconds
@@ -9023,7 +8959,7 @@ Runtime.task.spawn(function()
                 -- existing trades are still managed by the main controller.
                 PlazaRouter.preparing = true
                 if plazaTradeClear() then
-                    local ok, result = pcall(routeNormalServerToPlaza)
+                    local ok, result = PlazaRouter.runOperation(routeNormalServerToPlaza)
                     if not PlazaRouter.teleporting then
                         PlazaRouter.preparing = false
                         PlazaRouter.readyForTrading = true
@@ -9227,6 +9163,8 @@ local PlayerCooldowns =
 
 
 local function resetState()
+    Runtime.potionAddonPlan = nil
+    State.firstAcceptObserved, State.firstAcceptSentAt, State.emptyTheirSince = nil, nil, nil
     InventoryFlow.stop("trade state reset")
     State.unacceptRequired, State.declineRequested, State.policySignature = nil, nil, nil
     State.optimizedOurSignature, State.confirmPending, State.showcasePending, State.showcaseAttemptAt, State.waitForFirstAt = nil, nil, nil, nil, nil
@@ -9316,10 +9254,8 @@ end
 
 
 local function cooldown(player)
-    local id
-    if typeof(player) == "Instance" then id = tonumber(player.UserId)
-    elseif type(player) == "number" or type(player) == "string" then id = tonumber(player)
-    elseif type(player) == "table" then id = tonumber(player.user_id or player.userId or player.UserId or player.id) end
+    local id = Runtime.playerID(player)
+
     if not id then
         local name = playerName(player):lower()
         for _, candidate in ipairs(Players:GetPlayers()) do
@@ -9441,7 +9377,27 @@ end
 function Runtime.clearAcceptState()
     State.acceptedSignature, State.firstAcceptAt, State.firstAcceptSignature = nil, nil, nil
     State.confirmWaitLoggedSignature, State.confirmPending = nil, nil
+    State.firstAcceptObserved, State.firstAcceptSentAt = nil, nil
 end
+
+function Runtime.observeFirstAccept(trade, mine)
+    local signature = fullSignature(mine, select(2, getTradeSides(trade)))
+    if accepted(mine) or Runtime.tradeInConfirmation(trade) then
+        if State.firstAcceptSignature and State.firstAcceptSignature ~= signature
+            and (State.firstAcceptObserved or State.firstAcceptSentAt) then return end
+        if not State.firstAcceptObserved or State.firstAcceptSignature ~= signature then
+            State.acceptedSignature, State.firstAcceptSignature = signature, signature
+            State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
+        end
+        State.firstAcceptObserved = true
+    elseif State.firstAcceptObserved then
+        -- This is an observed true -> false transition, not a pending RPC.
+        Runtime.clearAcceptState()
+        State.acceptReadySignature, State.acceptReadySince = nil, nil
+        State.changedAt = os.clock()
+    end
+end
+
 
 local function unaccept(myOffer)
     local live = getTrade()
@@ -9504,12 +9460,16 @@ function Runtime.pruneDisallowed(trade)
     local context = Runtime.captureTrade(trade)
     local live, _, mine = Runtime.liveContext(context, true, true)
     if not live or Runtime.tradeInConfirmation(live) then return false end
+    if Settings.ownPotionsOnly and Runtime.potionAddonPlan and not Runtime.potionBasePresent(mine) then
+        Runtime.potionAddonPlan = nil
+        State.optimizedSignature, State.optimizedOurSignature = nil, nil
+    end
     local remove = {}
     for _, item in pairs(getOfferItems(mine)) do
         local data = effectiveItemValue(item)
         local belowMinimum = data.known and not data.newIgnored and data.value < activeMinItemValue("mine")
             and not CommonPetFilter.shouldBypassOurMinimum(item)
-        if not isAllowed(data.name) or belowMinimum then remove[#remove + 1] = tostring(itemUID(item)) end
+        if not isAllowed(data.name, item) or belowMinimum then remove[#remove + 1] = tostring(itemUID(item)) end
     end
     if #remove == 0 then return true end
     if not unaccept(mine) then return false end
@@ -9625,8 +9585,17 @@ local function evaluateTrade(
 
     if Settings.autoTrade then
         for _, row in ipairs(mine.items) do
-            if not isAllowed(row.data.name) then
+            if not isAllowed(row.data.name, row.raw) then
                 result.blocked, result.reason = true, "OUR ITEM NOT ALLOWED"
+                return result
+            end
+        end
+    end
+
+    if Settings.autoTrade and Settings.ownPotionsOnly then
+        for _, row in ipairs(mine.items) do
+            if not Runtime.isTradePotion(row.data.name) and not Runtime.potionBasePresent(myOffer) then
+                result.blocked, result.reason = true, "POTION BASE MISSING"
                 return result
             end
         end
@@ -9749,6 +9718,39 @@ end
 -- SECURE ACCEPT / CONFIRM
 --============================================================
 
+function Runtime.revalidatePotionPlan(trade, mine, theirs)
+    local old = Runtime.potionAddonPlan
+    if not old or not Settings.ownPotionsOnly or AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then return false end
+    local context = Runtime.captureTrade(trade)
+    if not context or context.key ~= old.context.key or context.generation ~= old.context.generation
+        or context.theirs ~= old.context.theirs then return false end
+    local safe = {}
+    for _, candidate in ipairs(valuedInventory(true)) do safe[candidate.uid] = candidate end
+    local present, baseCount = {}, 0
+    for _, item in pairs(getOfferItems(mine)) do
+        local uid = tostring(itemUID(item))
+        local expected = old.base[uid] or old.addons[uid]
+        local candidate = safe[uid]
+        if not expected or not candidate or expected ~= Runtime.potionItemKey(item)
+            or expected ~= Runtime.potionItemKey(candidate.item) or present[uid] then return false end
+        present[uid] = true
+    end
+    for uid in pairs(old.base) do if not present[uid] then return false end baseCount += 1 end
+    for uid in pairs(old.addons) do if not present[uid] then return false end end
+    if baseCount == 0 then return false end
+    -- Evaluate the unchanged composition against fresh prices and all current
+    -- rules; no server action occurs while the tentative plan is installed.
+    local nextPlan = {context=context, base=old.base, addons=old.addons}
+    Runtime.potionAddonPlan = nextPlan
+    local evaluation = evaluateTrade(mine, theirs)
+    if evaluation.blocked or not evaluation.valid or not Runtime.liveContext(context, true, true) then
+        Runtime.potionAddonPlan = nil
+        return false
+    end
+    return true
+end
+
+
 local function secureAccept(trade, myOffer, theirOffer, expectedContext)
     if expectedContext and not Runtime.liveContext(expectedContext, true, true) then return false end
     local context = Runtime.captureTrade(trade)
@@ -9756,6 +9758,11 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
     if not live or fullSignature(mine, theirs) ~= fullSignature(myOffer, theirOffer) then return false end
     if State.declineRequested then return false end
     if State.unacceptRequired then unaccept(mine) return false end
+    Runtime.observeFirstAccept(live, mine)
+    if Runtime.tradeInConfirmation(live) and Settings.ownPotionsOnly and Runtime.potionAddonPlan
+        and not Runtime.liveContext(Runtime.potionAddonPlan.context, false, true) then
+        Runtime.revalidatePotionPlan(live, mine, theirs)
+    end
     local evaluation = evaluateTrade(mine, theirs)
     if evaluation.blocked or not evaluation.valid then unaccept(mine) return false end
     local signature = fullSignature(mine, theirs)
@@ -9809,7 +9816,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
 
     if not accepted(mine) then
         if State.firstAcceptSignature == signature and State.firstAcceptAt then
-            if os.clock() - State.firstAcceptAt >= 12 then decline() return false end
+            if os.clock() - (State.firstAcceptSentAt or State.firstAcceptAt) >= 12 then decline() return false end
             setTestStatus("ACCEPT SENT • WAIT LIVE RESULT", C.YELLOW)
             return true
         end
@@ -9834,6 +9841,8 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         end
         State.acceptedSignature, State.firstAcceptSignature = signature, signature
         State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
+        State.firstAcceptSentAt, State.firstAcceptObserved = os.clock(), false
+        Runtime.observeFirstAccept(current, freshMine)
         testLog("FIRST ACCEPT SENT")
     elseif State.firstAcceptSignature ~= signature or not State.firstAcceptAt then
         State.acceptedSignature, State.firstAcceptSignature = signature, signature
@@ -9848,6 +9857,7 @@ end
 
 local function showcase(myOffer)
     if countOfferItems(myOffer) > 0 then return true, "OBSERVED" end
+    if not TradeRemote.Add then return false, "REMOTE MISSING" end
     local context = Runtime.captureTrade(getTrade())
     if not context or not Runtime.liveContext(context, true, true) then return false, "TRADE_CHANGED" end
     local pending = State.showcasePending
@@ -9955,16 +9965,13 @@ do
     function InventoryFlow.engaged() return false end
     function InventoryFlow.holdAccept() return false end
 local function identity(value)
-    if typeof(value) == "Instance" and value.ClassName == "Player" then return value.UserId, value.Name end
-    if type(value) == "table" then return tonumber(value.user_id or value.userId or value.UserId or value.id), value.username or value.Name or value.name end
-    if type(value) == "number" then return value end
+    local id = Runtime.playerID(value)
+    if id then return id, playerName(value) end
     if type(value) == "string" then
-        if tonumber(value) then return tonumber(value) end
         local player = Players:FindFirstChild(value)
-        if player and player.ClassName == "Player" then return player.UserId, player.Name end
+        if player and player.ClassName == "Player" then return Runtime.playerID(player), player.Name end
     end
 end
-
 
     function InventoryFlow.sendQuickChat(partner, index, fallback)
         if not Settings.autoTrade or not Settings.chatRequests then return false end
@@ -10089,6 +10096,7 @@ local function manageAutoTrade(trade)
         if not unaccept(myOffer) then setTestStatus("WAIT UNACCEPT • RETRY", C.YELLOW) return end
         if not Runtime.liveContext(operationContext, true, false) then return end
     end
+    Runtime.observeFirstAccept(trade, myOffer)
     local policy = Runtime.policySignature()
     if State.policySignature ~= policy then
         local changed = State.policySignature ~= nil
@@ -10173,6 +10181,13 @@ local function manageAutoTrade(trade)
             State.lastTheirSignature
             ~= nil
 
+        if countOfferItems(theirOffer) == 0 then
+            if hadPrevious and State.lastTheirSignature ~= "" then
+                State.emptyTheirSince, State.initialAsk = os.clock(), false
+            end
+        else
+            State.emptyTheirSince = nil
+        end
         State.lastTheirSignature =
             theirSignature
 
@@ -10331,7 +10346,8 @@ local function manageAutoTrade(trade)
         local elapsed =
             os.clock()
             - (
-                State.showcaseAddedAt
+                State.emptyTheirSince
+                or State.showcaseAddedAt
                 or State.waitForFirstAt
                 or State.tradeStarted
                 or os.clock()
@@ -10692,7 +10708,7 @@ local function manageAutoTrade(trade)
             ourValue,
             cap,
             optimizationError =
-            optimizeOurOffer(
+            Runtime.optimizeOwnOffer(
                 evaluation.theirs.effectiveTotal
             )
 
