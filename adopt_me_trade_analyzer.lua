@@ -28,8 +28,7 @@ local MarketplaceService =
 local LocalPlayer =
     Players.LocalPlayer
 
-local PlayerGui =
-    LocalPlayer:WaitForChild("PlayerGui")
+local PlayerGui
 
 local ENV =
     type(getgenv) == "function"
@@ -42,7 +41,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.36"
+    "11.7.39"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -56,7 +55,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] INVENTORY SUGGEST 3 > 2 > 1 + DEMAND + PROTECTED OUR 3 STAR PETS"
+    "[AM V" .. VERSION .. "] POTION FIRST + DEMAND 10/15/20 (0.15pp TOLERANCE) + PROTECTED OUR 3 STAR PETS"
 )
 
 
@@ -88,18 +87,26 @@ end
 local Runtime = {active = true, jobs = {}, connections = {}, cleanups = {}}
 do
     local nativeTask = task
+    Runtime.nativeTask = nativeTask
     local key = "__AM_ANALYZER_RUNTIME"
     local previous = ENV[key]
     if type(previous) == "table" and type(previous.stop) == "function" then
         pcall(previous.stop, "replaced by a new analyzer")
     end
     ENV[key] = Runtime
+    Runtime.initializingThread = coroutine.running()
     function Runtime.alive()
         return Runtime.active and ENV[key] == Runtime
     end
     function Runtime.stop(reason)
         if not Runtime.active then return end
+        if Runtime.beginAcceptanceCancellation then pcall(Runtime.beginAcceptanceCancellation, reason or "stopped") end
         Runtime.active = false
+        local initializing = Runtime.initializingThread
+        Runtime.initializingThread = nil
+        if type(initializing) == "thread" and initializing ~= coroutine.running() and coroutine.status(initializing) ~= "dead" then
+            pcall(nativeTask.cancel, initializing)
+        end
         if Runtime.flow then pcall(Runtime.flow.stop, reason or "stopped") end
         for _, connection in ipairs(Runtime.connections) do
             pcall(function() connection:Disconnect() end)
@@ -146,6 +153,11 @@ do
     }, {__index = nativeTask})
 end
 
+
+PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 15)
+if not Runtime.alive() then return end
+GuiParent = GuiParent or PlayerGui
+if not GuiParent then warn("AM: PlayerGui unavailable") Runtime.stop("PlayerGui unavailable") return end
 
 local OLD_GUI_NAMES = {
     GUI_NAME,
@@ -662,6 +674,19 @@ local function num(value)
     return result
 end
 
+function Runtime.priceFieldsValid(entry)
+    if type(entry) ~= "table" then return false end
+    local any = false
+    for _, field in ipairs({"value","regularValue","neonValue","megaValue","npRegularValue","npNeonValue","npMegaValue","fValue","rValue","frValue","nfValue","nrValue","mfValue","mrValue"}) do
+        if entry[field] ~= nil then
+            local price = num(entry[field])
+            if price == nil or price < 0 then return false end
+            any = true
+        end
+    end
+    return any
+end
+
 local function round(value, decimals)
     value = num(value)
     if value == nil then return nil end
@@ -818,12 +843,7 @@ local function aliases(text)
         original
     )
 
-    add(
-        original:gsub(
-            "%b()",
-            ""
-        )
-    )
+    -- Parenthetical qualifiers are meaningful item identity, never a generic alias.
 
     add(
         original:gsub(
@@ -1051,9 +1071,11 @@ do
                     require(
                         RS:
                         WaitForChild(
-                            "Fsys"
+                            "Fsys", 15
                         )
                     )
+
+                if not Runtime.alive() then return end
 
                 assert(
                     type(Fsys)
@@ -1072,10 +1094,14 @@ do
                         "ClientData"
                     )
 
+                if not Runtime.alive() then return end
+
                 ItemDB =
                     Fsys.load(
                         "ItemDB"
                     )
+
+                if not Runtime.alive() then return end
 
                 pcall(
                     function()
@@ -1086,6 +1112,8 @@ do
                             )
                     end
                 )
+
+                if not Runtime.alive() then return end
 
                 assert(
                     type(ClientData)
@@ -1103,6 +1131,7 @@ do
             traceback
         )
 
+    if not Runtime.alive() then return end
     if not ok then
 
         setBoot(
@@ -1838,51 +1867,9 @@ end
 --============================================================
 
 local function validEntry(object)
-
-    if
-        type(object)
-            ~= "table"
-        or type(
-            object.name
-        ) ~= "string"
-    then
-
-        return false
-    end
-
-    return
-
-        object.value
-            ~= nil
-
-        or object.regularValue
-            ~= nil
-
-        or object.neonValue
-            ~= nil
-
-        or object.megaValue
-            ~= nil
-
-        or object.npRegularValue
-            ~= nil
-
-        or object.npNeonValue
-            ~= nil
-
-        or object.npMegaValue
-            ~= nil
-
-        or object.fValue
-            ~= nil
-
-        or object.rValue
-            ~= nil
-
-        or object.frValue
-            ~= nil
+    return type(object) == "table" and type(object.name) == "string"
+        and object.name ~= "" and Runtime.priceFieldsValid(object)
 end
-
 
 local function merge(
     target,
@@ -2125,34 +2112,58 @@ local function findCategory(slug, itemName)
     local category = AMVGG.categories[slug]
     if type(category) ~= "table" then return nil end
     local exact = normalize(itemName)
-    local function valid(entry)
-        return type(entry) == "table" and not entry.__ambiguous and type(entry.name) == "string"
-    end
     local direct = category[exact]
     if type(direct) == "table" and direct.__ambiguous then return nil end
-    if valid(direct) and normalize(direct.name) == exact then return direct, exact end
-    local found, foundKey
-    for key, entry in pairs(category) do
-        if valid(entry) and normalize(entry.name) == exact then
-            if found and found ~= entry then return nil end
-            found, foundKey = entry, key
-        end
+    if type(direct) == "table" and type(direct.name) == "string" and normalize(direct.name) == exact then
+        return direct, exact
     end
-    if found then return found, foundKey end
-    local wanted = aliases(itemName)
-    for key, entry in pairs(category) do
-        if valid(entry) then
-            local names = aliases(entry.name)
-            local matches = false
-            for name in pairs(wanted) do if names[name] then matches = true break end end
-            if matches then
-                if found and found ~= entry then return nil end
-                found, foundKey = entry, key
+    Runtime.lookupIndexes = Runtime.lookupIndexes or {}
+    local version = AMVGG.version
+    local index = Runtime.lookupIndexes[slug]
+    if not index or index.database ~= category or index.version ~= version then
+        index = {database=category, version=version, exact={}, aliases={}}
+        local function insert(map, name, entry, key)
+            local previous = map[name]
+            if previous == false then return end
+            if previous and previous.entry ~= entry then map[name] = false
+            else map[name] = {entry=entry, key=key} end
+        end
+        local scanned = 0
+        for key, entry in pairs(category) do
+            if type(entry) == "table" and type(entry.name) == "string" then
+                if entry.__ambiguous then
+                    index.exact[normalize(entry.name)] = false
+                else
+                    insert(index.exact, normalize(entry.name), entry, key)
+                    for name in pairs(aliases(entry.name)) do insert(index.aliases, name, entry, key) end
+                end
+            end
+            scanned += 1
+            if scanned % 64 == 0 then
+                Runtime.task.wait()
+                if not Runtime.alive() or AMVGG.categories[slug] ~= category or AMVGG.version ~= version then return nil end
             end
         end
+        Runtime.lookupIndexes[slug] = index
+        Runtime.lookupIndexBuilds = (Runtime.lookupIndexBuilds or 0) + 1
     end
-    return found, foundKey
+    local found = index.exact[exact]
+    if found == false then return nil end
+    if found then return found.entry, found.key end
+    -- Missing names are constant-time lookups after one indexed catalog pass.
+    for name in pairs(aliases(itemName)) do
+        local candidate = index.aliases[name]
+        if candidate == false then return nil end
+        if candidate then
+            if found and found.entry ~= candidate.entry then return nil end
+            found = candidate
+        end
+    end
+    if found then return found.entry, found.key end
+    return nil
 end
+
+
 
 -- Read-only baseline verified against all ten public AMVGG catalogs on 2026-10-06.
 Runtime.catalogMinimum = {pets=786, eggs=44, petwear=237, strollers=35, food=51,
@@ -2162,7 +2173,9 @@ function Runtime.catalogFingerprint(slug, database, count)
     if type(database) ~= "table" or not num(count) or count % 1 ~= 0 then return nil end
     local identities, seen, actual = {}, {}, 0
     for key, entry in pairs(database) do
-        if type(entry) ~= "table" or type(entry.name) ~= "string" or entry.__ambiguous then return nil end
+        if type(entry) ~= "table" or type(entry.name) ~= "string" or entry.__ambiguous
+            or not Runtime.priceFieldsValid(entry)
+            or (Runtime.catalogPriceValid and not Runtime.catalogPriceValid(slug, entry)) then return nil end
         local identity = entry.id ~= nil and "id:" .. tostring(entry.id) or "name:" .. tostring(key)
         if seen[identity] then return nil end
         seen[identity], actual = true, actual + 1
@@ -2632,64 +2645,38 @@ local function calculateCategoryVariants(category, regularValue, neonValue, mega
 end
 
 
-local function getPetValue(
-    entry,
-    variant
-)
-
-    if type(entry) ~= "table" then
-        return nil, nil, false, "INVALID ENTRY"
-    end
-
-    local category = tonumber(entry.category)
-
-    -- Category 13 exposes exact fields for all 12 variants.
-    if category == 13 then
-
-        local field = EXACT_FIELD[variant]
-
-        if not field then
-            return nil, nil, false, "UNKNOWN VARIANT"
-        end
-
+local function getPetValue(entry, variant)
+    if type(entry) ~= "table" then return nil, nil, false, "INVALID ENTRY" end
+    if not EXACT_FIELD[variant] then return nil, nil, false, "UNKNOWN VARIANT" end
+    local function exact(field)
         local value = num(entry[field])
-        if value and value < 0 then value = nil end
-
-        return
-            value,
-            field,
-            false,
-            value == nil and "CATEGORY 13 FIELD NIL" or nil
+        if value == nil or value < 0 then return nil, field, false, "MISSING/INVALID " .. field end
+        return value, field, false
     end
-
-    if not category then
-        return nil, nil, false, "NO CATEGORY"
+    -- AMVGG's category-less representation explicitly uses one value/demand.
+    if entry.category == nil then return exact("value") end
+    local category = num(entry.category)
+    if category == 13 then return exact(EXACT_FIELD[variant]) end
+    if category == nil then return nil, nil, false, "NO CATEGORY" end
+    if not MULTIPLIERS[category] then return nil, nil, false, "NO MULTIPLIER FOR CATEGORY " .. tostring(category) end
+    if variant == "FR" then return exact("regularValue") end
+    if variant == "NFR" then return exact("neonValue") end
+    if variant == "MFR" then return exact("megaValue") end
+    local family = variant:sub(1,1)
+    local field = family == "M" and "megaValue" or (family == "N" and variant ~= "NP") and "neonValue" or "regularValue"
+    local base = num(entry[field])
+    if base == nil or base < 0 then return nil, field, false, "MISSING/INVALID " .. field end
+    local regular = num(entry.regularValue)
+    if category == 11 and field ~= "regularValue" and (regular == nil or regular < 0) then
+        return nil, "regularValue", false, "MISSING/INVALID regularValue FOR CATEGORY 11"
     end
-
-    local variants = calculateCategoryVariants(
-        category,
-        entry.regularValue,
-        entry.neonValue,
-        entry.megaValue
-    )
-
-    if not variants then
-        return
-            nil,
-            nil,
-            false,
-            "NO MULTIPLIER FOR CATEGORY " .. tostring(category)
-    end
-
-    local value = variants[variant]
-
-    return
-        value,
-        "CALC/CAT=" .. tostring(category),
-        false,
-        value == nil and "CALCULATED NIL" or nil
+    -- Unused families are not required, and never supply the requested value.
+    local variants = calculateCategoryVariants(category,
+        field == "regularValue" and base or math.max(0, regular or 0),
+        field == "neonValue" and base or 0, field == "megaValue" and base or 0)
+    local value = variants and variants[variant]
+    return value, "CALC/CAT=" .. tostring(category), false, value == nil and "CALCULATED NIL" or nil
 end
-
 
 local function genericValue(entry)
 
@@ -2715,6 +2702,15 @@ local function genericValue(entry)
 end
 
 
+function Runtime.catalogPriceValid(slug, entry)
+    if not Runtime.priceFieldsValid(entry) then return false end
+    if slug ~= "pets" then return genericValue(entry) ~= nil end
+    for variant in pairs(EXACT_FIELD) do
+        if getPetValue(entry, variant) ~= nil then return true end
+    end
+    return false
+end
+
 --============================================================
 -- ANALYZE ITEM
 --============================================================
@@ -2734,6 +2730,7 @@ do
     local LABEL_STARS = {low = 1, medium = 2, decent = 2, high = 3}
 
     local function getPetDemand(entry, variant)
+        if entry.category == nil then return entry.demand end
         if tonumber(entry.category) == 13 then
             local field = EXACT_DEMAND_FIELD[variant]
             return field and entry[field] or nil
@@ -2777,9 +2774,9 @@ do
     function DemandPolicy.credit(rawValue, analysis, itemMinimumWinPercent)
         if analysis and analysis.isRealPet then
             local stars = analysis.demandStars
-            if stars == 3 then return rawValue / 0.98, "3STAR" end
-            if stars == 2 then return rawValue / 1.15, "2STAR" end
-            if stars == 1 then return rawValue / 1.20, "1STAR" end
+            if stars == 3 then return rawValue / 1.0985, "3STAR" end
+            if stars == 2 then return rawValue / 1.1485, "2STAR" end
+            if stars == 1 then return rawValue / 1.1985, "1STAR" end
             return nil, "DEMAND UNKNOWN"
         end
         return rawValue / (1 + itemMinimumWinPercent / 100), "ITEM"
@@ -2847,6 +2844,7 @@ local function analyzeItem(item)
         return result
     end
 
+    result.entry = entry
     result.source =
         source
 
@@ -2915,6 +2913,26 @@ end
 
 function DemandPolicy.ownItemReason(item)
     return DemandPolicy.ownAnalysisReason(analyzeItem(item))
+end
+
+Runtime.numberLimits = {
+                        minProfitPercent={0,500}, itemMinimumWinPercent={0,500},
+                        myMinItemValue={0.0005,1000000}, theirMinItemValue={0.0005,1000000}, allMinItemValue={0.0005,1000000},
+                        maxOurItems={1,18}, optimizerBeam={80,2000}, newItemHours={0,720}, refreshMinutes={1,1440},
+                        requestTimeout={1,300}, firstItemTimeout={5,3600}, addTimeout={5,3600}, unknownBlockTimeout={5,3600},
+                        playerCooldown={0,86400}, settleSeconds={0,60}, partnerRebuildDelay={0,120}, maxTradeSeconds={180,7200},
+                        showcaseDelay={0,120}, itemActionDelay={0.1,10}, postRebuildDelay={0.25,30}, preAcceptDelay={0,120},
+                        secondConfirmDelay={0,120}, plazaHopMinutes={0,1440},
+                        waitWindowProfile={0,1}, askAddWindowProfile={0,1}, plazaHopProfile={0,1},
+                    }
+
+function Runtime.numberValue(key,value,fallbackMin,fallbackMax)
+    local parsed=num(value)
+    if not parsed then return nil end
+    local bounds=Runtime.numberLimits[key] or {fallbackMin or 0,fallbackMax or 1000000}
+    parsed=math.clamp(parsed,bounds[1],bounds[2])
+    if key=="maxOurItems" or key=="optimizerBeam" then parsed=math.floor(parsed) end
+    return parsed
 end
 
 local SETTINGS_FILE =
@@ -3165,19 +3183,7 @@ do
             if type(default) == "number" then
                 local parsed = num(value)
                 if parsed then
-                    local limits = {
-                        minProfitPercent={0,500}, itemMinimumWinPercent={0,500},
-                        myMinItemValue={0.0005,1000000}, theirMinItemValue={0.0005,1000000}, allMinItemValue={0.0005,1000000},
-                        maxOurItems={1,18}, optimizerBeam={1,2000}, newItemHours={0,720}, refreshMinutes={1,1440},
-                        requestTimeout={1,300}, firstItemTimeout={5,3600}, addTimeout={5,3600}, unknownBlockTimeout={5,3600},
-                        playerCooldown={0,86400}, settleSeconds={0,60}, partnerRebuildDelay={0,120}, maxTradeSeconds={180,7200},
-                        showcaseDelay={0,120}, itemActionDelay={0.1,10}, postRebuildDelay={0.25,30}, preAcceptDelay={0,120},
-                        secondConfirmDelay={0,120}, plazaHopMinutes={0,1440},
-                        waitWindowProfile={0,1}, askAddWindowProfile={0,1}, plazaHopProfile={0,1},
-                    }
-                    local bound = limits[key] or {0,1000000}
-                    parsed = math.clamp(parsed, bound[1], bound[2])
-                    if key == "maxOurItems" or key == "optimizerBeam" then parsed = math.floor(parsed) end
+                    parsed = Runtime.numberValue(key, parsed)
                     Settings[key] = parsed
                 end
             elseif type(default) == "boolean" then
@@ -3370,6 +3376,7 @@ function Runtime.disableAutomation()
         state.optimizedSignature, state.acceptReadySignature, state.acceptReadySince = nil, nil, nil
         state.policySignature, state.optimizedOurSignature, state.confirmPending = nil, nil, nil
     end
+    if Runtime.requestStopAcceptance then Runtime.requestStopAcceptance() end
 end
 
 
@@ -3504,68 +3511,29 @@ local function updateFirstSeen()
 end
 
 
-local function isNewEntry(
-    source,
-    entry
-)
-
-    if
-        type(entry) ~= "table"
-        or not source
-    then
-
-        return
-            false,
-            0
+function Runtime.newPolicySignature()
+    local now = os.time()
+    if Runtime.nextNewExpiry and now >= Runtime.nextNewExpiry then
+        Runtime.newPolicyEpoch = (Runtime.newPolicyEpoch or 0) + 1
+        Runtime.nextNewExpiry = nil
     end
-
-    local id =
-        entryID(
-            source,
-            normalize(
-                entry.name
-                or ""
-            ),
-            entry
-        )
-
-    local seen =
-        tonumber(
-            FirstSeen.items[
-                id
-            ]
-        )
-
-    if
-        not seen
-        or seen <= 0
-    then
-
-        return
-            false,
-            0
-    end
-
-    local age =
-        os.time()
-        - seen
-
-    local maxAge =
-        (
-            tonumber(
-                Settings.newItemHours
-            )
-            or 24
-        )
-        * 3600
-
-    return
-
-        age >= 0
-        and age < maxAge,
-
-        age
+    return Runtime.newPolicyEpoch or 0
 end
+
+local function isNewEntry(source, entry)
+    Runtime.newPolicySignature()
+    if type(entry) ~= "table" or not source then return false, 0 end
+    local id = entryID(source, normalize(entry.name or ""), entry)
+    local seen = num(FirstSeen.items[id])
+    if not seen or seen <= 0 then return false, 0 end
+    local now = os.time()
+    local age = now - seen
+    local maxAge = (num(Settings.newItemHours) or 24) * 3600
+    local active = age >= 0 and age < maxAge
+    if active then Runtime.nextNewExpiry = math.min(Runtime.nextNewExpiry or math.huge, seen + maxAge) end
+    return active, age
+end
+
 
 
 --============================================================
@@ -3575,11 +3543,7 @@ end
 local function effectiveItemValue(item)
     local analysis = analyzeItem(item)
 
-    local entry,
-        source =
-        findAMVGG(
-            item
-        )
+    local entry, source = analysis.entry, analysis.source
 
     if
         entry
@@ -3876,27 +3840,19 @@ local function countOfferItems(offer)
 end
 
 
-local function itemSignature(item)
-
-    return
-
-        tostring(
-            itemUID(
-                item
-            )
-            or item.kind
-            or "?"
-        )
-
-        .. ":"
-
-        .. tostring(
-            getVariant(
-                item
-            )
-        )
+function Runtime.instanceUID(item)
+    if type(item) ~= "table" then return nil end
+    local uid = item.unique or item.uid
+    if type(uid) == "string" and uid ~= "" then return uid end
+    if type(uid) == "number" and num(uid) and uid >= 0 then return tostring(uid) end
+    return nil
 end
 
+local function itemSignature(item)
+    if type(item) ~= "table" then return "INVALID ITEM" end
+    return string.format("%q:%q:%q:%q", tostring(itemUID(item) or "?"),
+        tostring(item.kind), tostring(item.category), tostring(getVariant(item)))
+end
 
 local function offerSignature(offer)
 
@@ -3960,8 +3916,18 @@ function Runtime.partnerKey(partner)
     return "name:" .. playerName(partner):lower()
 end
 
+function Runtime.tradeID(trade)
+    if type(trade) ~= "table" then return nil end
+    local id = trade.trade_id or trade.id
+    if type(id) == "string" and id ~= "" then return id end
+    if type(id) == "number" and num(id) and id >= 0 then return tostring(id) end
+    return nil
+end
+
 function Runtime.tradeKey(trade, partner)
-    return tostring(trade.trade_id or trade.id or playerName(partner)) .. ":" .. Runtime.partnerKey(partner)
+    local id = Runtime.tradeID(trade)
+    if id == nil then return nil end
+    return string.format("%q:%q", id, Runtime.partnerKey(partner))
 end
 
 function Runtime.captureTrade(trade)
@@ -3969,11 +3935,12 @@ function Runtime.captureTrade(trade)
     local mine, theirs, _, partner = getTradeSides(live)
     local suppliedMine, suppliedTheirs, _, suppliedPartner = getTradeSides(trade)
     if not mine or not theirs or not suppliedMine or not suppliedTheirs
+        or not Runtime.tradeID(live) or not Runtime.tradeID(trade)
         or Runtime.tradeKey(live, partner) ~= Runtime.tradeKey(trade, suppliedPartner)
         or fullSignature(mine, theirs) ~= fullSignature(suppliedMine, suppliedTheirs) then return nil end
     return {
         key = Runtime.tradeKey(live, partner), generation = AutoTradeGeneration, auto = Settings.autoTrade,
-        prices = AMVGG.version, policy = Runtime.policySignature(),
+        prices = AMVGG.version, policy = Runtime.policySignature(), newPolicy = Runtime.newPolicySignature(),
         mine = offerSignature(mine), theirs = offerSignature(theirs),
     }
 end
@@ -3990,6 +3957,7 @@ function Runtime.liveContext(context, checkMine, checkPrices)
     if checkPrices then
         if AMVGG.dataStale or AMVGG.loading or not AMVGG.ready then return nil, "PRICES_UNAVAILABLE" end
         if AMVGG.version ~= context.prices then return nil, "PRICES_CHANGED" end
+        if Runtime.newPolicySignature() ~= context.newPolicy then return nil, "NEW_POLICY_CHANGED" end
         if Runtime.policySignature() ~= context.policy then return nil, "POLICY_CHANGED" end
     end
     return live, nil, mine, theirs
@@ -3997,7 +3965,7 @@ end
 
 function Runtime.optimizationKey(theirOffer)
     return offerSignature(theirOffer) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|POLICY=" .. Runtime.policySignature()
-        .. "|INVENTORY=" .. Runtime.inventorySignature()
+        .. "|INVENTORY=" .. Runtime.inventorySignature() .. "|NEW=" .. tostring(Runtime.newPolicySignature())
 end
 
 
@@ -4079,6 +4047,7 @@ local function evaluateOffer(
         items =
             {},
     }
+    local seenUIDs = {}
 
     for _,
         item in pairs(
@@ -4091,6 +4060,10 @@ local function evaluateOffer(
         result.count =
             result.count
             + 1
+
+        local uid = Runtime.instanceUID(item)
+        if uid and seenUIDs[uid] then result.integrityError = true continue end
+        if uid then seenUIDs[uid] = true end
 
         local data =
             effectiveItemValue(
@@ -4164,9 +4137,7 @@ local function evaluateOffer(
 
             local bypassOwnMinimum =
                 options.bypassOwnMinimumForUnwanted == true
-                and CommonPetFilter.shouldBypassOurMinimum(
-                    item
-                )
+                and Runtime.bypassOwnMinimum(item, data.name)
 
             if
                 type(data.value) == "number"
@@ -4478,7 +4449,18 @@ for operation in pairs(Runtime.tradeRemoteNames) do Runtime.resolveTradeRemote(o
 
 
 local function remoteCall(remote, ...)
+    return Runtime.invokeRemote(remote, nil, ...)
+end
+
+function Runtime.invokeRemote(remote, expected, ...)
     if not remote then return false, "REMOTE MISSING" end
+    local function expectedCurrent()
+        if not expected then return true end
+        if not Settings.autoTrade or expected.context.auto ~= true then return false end
+        local live, _, mine = Runtime.liveContext(expected.context, expected.mine ~= false, expected.prices ~= false)
+        return live ~= nil and (not expected.proof or Runtime.ownProofCurrent(expected.proof, mine))
+    end
+    if not expectedCurrent() then return false, "REMOTE CANCELLED" end
     Runtime.remoteCalls = Runtime.remoteCalls or {}
     local previous = Runtime.remoteCalls[remote]
     if previous and not previous.done and os.clock() < previous.expires then
@@ -4490,6 +4472,8 @@ local function remoteCall(remote, ...)
     local operation = {done = false, abandoned = false, expires = os.clock() + 30}
     Runtime.remoteCalls[remote] = operation
     local function invoke()
+        if not expectedCurrent() then operation.done=true operation.result=table.pack(false,"REMOTE CANCELLED") return end
+        if expected and expected.acceptRecord then expected.acceptRecord.started=true end
         local result = table.pack(pcall(function()
             if typeof(remote) == "Instance" then
                 if remote:IsA("RemoteEvent") then
@@ -4527,7 +4511,7 @@ local function remoteCall(remote, ...)
         return false, reason
     end
     local function current()
-        if not Runtime.alive() or generation ~= AutoTradeGeneration then return false end
+        if not Runtime.alive() or generation ~= AutoTradeGeneration or not expectedCurrent() then return false end
         if before and before.key then
             local after = Runtime.captureTrade(getTrade())
             if not after or after.key ~= before.key then return false end
@@ -4635,7 +4619,16 @@ local function itemLocked(item)
 end
 
 
+function Runtime.yieldInventoryWork(index, context, prices, generation)
+    if index % 64 ~= 0 then return true end
+    Runtime.task.wait()
+    return Runtime.alive() and prices == AMVGG.version and generation == AutoTradeGeneration
+        and (not context or Runtime.liveContext(context, true, true) ~= nil)
+end
+
 local function inventoryItems()
+    local operation = getTrade() and Runtime.captureTrade(getTrade())
+    local prices, generation, scanned = AMVGG.version, AutoTradeGeneration, 0
 
     local inventory =
         getInventory()
@@ -4663,6 +4656,8 @@ local function inventoryItems()
                     bucket
                 )
             do
+                scanned += 1
+                if not Runtime.yieldInventoryWork(scanned, operation, prices, generation) then return {} end
 
                 if type(raw) == "table" then
 
@@ -4717,6 +4712,59 @@ end
 --============================================================
 -- ALLOWED ITEMS
 --============================================================
+
+function Runtime.ownOfferProof(context, mine)
+    local wanted, proof = {}, {entries={}}
+    for _, item in pairs(getOfferItems(mine)) do
+        local uid = Runtime.instanceUID(item)
+        if not uid or wanted[uid] or itemLocked(item) then return nil end
+        wanted[uid] = itemSignature(item)
+    end
+    local inventory, scanned = getInventory(), 0
+    if type(inventory) ~= "table" then return nil end
+    for category, bucket in pairs(inventory) do
+        if type(bucket) == "table" then
+            for key, raw in pairs(bucket) do
+                scanned += 1
+                if type(raw) == "table" then
+                    local item = shallowCopy(raw)
+                    item.category, item.unique = item.category or category, item.unique or item.uid or key
+                    local uid = Runtime.instanceUID(item)
+                    if uid and wanted[uid] then
+                        if proof.entries[uid] or itemLocked(item) or itemSignature(item) ~= wanted[uid] then return nil end
+                        proof.entries[uid] = {category=category, key=key, signature=wanted[uid]}
+                    end
+                end
+                if scanned % 64 == 0 then
+                    Runtime.task.wait()
+                    if not Runtime.liveContext(context, true, true) then return nil end
+                end
+            end
+        end
+    end
+    for uid in pairs(wanted) do if not proof.entries[uid] then return nil end end
+    if not Runtime.liveContext(context, true, true) or not Runtime.ownProofCurrent(proof, mine) then return nil end
+    return proof
+end
+
+function Runtime.ownProofCurrent(proof, mine)
+    local inventory = getInventory()
+    if type(inventory) ~= "table" then return false end
+    local count = 0
+    for _, offered in pairs(getOfferItems(mine)) do
+        local uid = Runtime.instanceUID(offered)
+        local entry = uid and proof.entries[uid]
+        local bucket = entry and inventory[entry.category]
+        local raw = type(bucket) == "table" and bucket[entry.key]
+        if type(raw) ~= "table" or itemLocked(offered) then return false end
+        local item = shallowCopy(raw)
+        item.category, item.unique = item.category or entry.category, item.unique or item.uid or entry.key
+        if itemLocked(item) or itemSignature(item) ~= entry.signature or itemSignature(offered) ~= entry.signature then return false end
+        count += 1
+    end
+    local total = 0 for _ in pairs(proof.entries) do total += 1 end
+    return count == total
+end
 
 function Runtime.inventorySignature()
     local now = os.clock()
@@ -4780,6 +4828,11 @@ function Runtime.isTradePotion(name)
     return key == normalize("Ride-A-Pet Potion") or key == normalize("Fly-A-Pet Potion")
 end
 
+function Runtime.bypassOwnMinimum(item, name)
+    return CommonPetFilter.shouldBypassOurMinimum(item)
+        or (Settings.ownPotionsOnly == true and Runtime.isTradePotion(name or getItemName(item)))
+end
+
 function Runtime.potionItemKey(item)
     return tostring(itemUID(item)) .. ":" .. tostring(item.kind) .. ":" .. tostring(item.category) .. ":" .. getVariant(item)
 end
@@ -4815,6 +4868,10 @@ local function isAllowed(name, item, selectingAddons)
         return false
     end
 
+    -- This dedicated mode explicitly enables both real potions even when
+    -- the normal pet allow-list is populated. Filler items still use that list.
+    if Settings.ownPotionsOnly == true and Runtime.isTradePotion(name) then return true end
+
     local allowed =
         parseAllowed()
 
@@ -4834,6 +4891,8 @@ end
 
 
 local function valuedInventory(selectingAddons)
+    local operation = getTrade() and Runtime.captureTrade(getTrade())
+    local prices, generation, scanned = AMVGG.version, AutoTradeGeneration, 0
 
     local result =
         {}
@@ -4843,6 +4902,8 @@ local function valuedInventory(selectingAddons)
             inventoryItems()
         )
     do
+        scanned += 1
+        if not Runtime.yieldInventoryWork(scanned, operation, prices, generation) then return {} end
 
         local data =
             effectiveItemValue(
@@ -4874,9 +4935,7 @@ local function valuedInventory(selectingAddons)
             and (
                 data.value
                     >= activeMinItemValue("mine")
-                or CommonPetFilter.shouldBypassOurMinimum(
-                    item
-                )
+                or Runtime.bypassOwnMinimum(item, data.name)
             )
             -- AUTO TRADE must never build an offer from guessed pet values.
             -- Estimated values may still be displayed outside AUTO TRADE,
@@ -5282,6 +5341,17 @@ function Runtime.optimizeOwnOffer(cap)
 end
 
 
+function Runtime.potionWaitingOffer()
+    local cheapest
+    for _, candidate in ipairs(valuedInventory()) do
+        if Runtime.isTradePotion(candidate.name) and (not cheapest or candidate.value < cheapest.value) then
+            cheapest = candidate
+        end
+    end
+    if cheapest then return {cheapest}, cheapest.value end
+    return {}, 0
+end
+
 local function addOurItem(uid)
 
     if not TradeRemote.Add then
@@ -5301,7 +5371,7 @@ local function addOurItem(uid)
                 if not Runtime.potionBasePresent(mine) then return false, "POTION BASE MISSING" end
             end
             if not data.known or data.newIgnored or data.estimated or data.value <= 0 then return false, "EXACT SAFE VALUE REQUIRED" end
-            if data.value < activeMinItemValue("mine") and not CommonPetFilter.shouldBypassOurMinimum(item) then return false, "OUR ITEM < MIN VALUE" end
+            if data.value < activeMinItemValue("mine") and not Runtime.bypassOwnMinimum(item, data.name) then return false, "OUR ITEM < MIN VALUE" end
             local reason = DemandPolicy.ownItemReason(item)
             if reason then return false, reason end
             found = true
@@ -5374,10 +5444,12 @@ local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
     if not initialMine or not initialTheirs or not initialPartner then
         return false, "TRADE_CHANGED"
     end
-    local initialID = tostring(initial.trade_id or initial.id or playerName(initialPartner))
+    local initialID = Runtime.tradeID(initial)
+    if not initialID then return false, "MISSING_TRADE_ID" end
     local initialPartnerKey = partnerKey(initialPartner)
     local initialGeneration = AutoTradeGeneration
     local initialPrices, initialPolicy = AMVGG.version, Runtime.policySignature()
+    local initialNewPolicy = Runtime.newPolicySignature()
 
     -- Check the operation's trade context after every yield, including remote
     -- replies. An identical incoming offer in another trade is not this build.
@@ -5388,11 +5460,12 @@ local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
         if not Gui.Parent or not Runtime.alive() then return "GUI_CLOSED" end
         if AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then return "PRICES_UNAVAILABLE" end
         if AMVGG.version ~= initialPrices then return "PRICES_CHANGED" end
+        if Runtime.newPolicySignature() ~= initialNewPolicy then return "NEW_POLICY_CHANGED" end
         if Runtime.policySignature() ~= initialPolicy then return "POLICY_CHANGED" end
         local live = getTrade()
         local mine, theirs, _, partner = getTradeSides(live)
         if not mine or not theirs or not partner
-            or tostring(live.trade_id or live.id or playerName(partner)) ~= initialID
+            or Runtime.tradeID(live) ~= initialID
             or partnerKey(partner) ~= initialPartnerKey then
             return "TRADE_CHANGED"
         end
@@ -5410,10 +5483,6 @@ local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
 
     local reason = contextReason()
     if reason then return false, reason end
-    for _, item in pairs(getOfferItems(myOffer)) do
-        reason = DemandPolicy.ownItemReason(item)
-        if reason then return false, reason end
-    end
     for _, candidate in ipairs(desired) do
         if not isAllowed(effectiveItemValue(candidate.item).name, candidate.item) then return false, "OUR ITEM NOT ALLOWED" end
         reason = DemandPolicy.ownItemReason(candidate.item)
@@ -5447,8 +5516,6 @@ local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
         if uid ~= nil and not wanted[tostring(uid)] then
             Runtime.task.wait(actionDelay)
             reason = contextReason()
-            if reason then return false, reason end
-            reason = DemandPolicy.ownItemReason(item)
             if reason then return false, reason end
             local ok, result = removeOurItem(tostring(uid))
             reason = contextReason()
@@ -5491,16 +5558,15 @@ end
 -- CHAT
 --============================================================
 
-local function sendChat(text)
-    if not Settings.chatRequests or not Runtime.alive() then return false end
-    local generation, auto = AutoTradeGeneration, Settings.autoTrade
-    local trade = getTrade()
-    local context = trade and Runtime.captureTrade(trade)
+local function sendChat(text, expectedContext)
+    if not Settings.autoTrade or not Settings.chatRequests or not Runtime.alive() then return false, "CHAT CANCELLED" end
+    local generation = AutoTradeGeneration
+    local context = expectedContext or (getTrade() and Runtime.captureTrade(getTrade()))
     local function current()
-        return Runtime.alive() and Settings.chatRequests
-            and AutoTradeGeneration == generation and Settings.autoTrade == auto
-            and (not context or Runtime.liveContext(context, false, false) ~= nil)
+        return Runtime.alive() and Settings.autoTrade and Settings.chatRequests
+            and AutoTradeGeneration == generation and (not context or Runtime.liveContext(context, false, false) ~= nil)
     end
+    if not current() then return false, "CHAT CANCELLED" end
     local ok, message = Runtime.runBounded(function()
         local channels = TextChatService:FindFirstChild("TextChannels")
         local general = channels and channels:FindFirstChild("RBXGeneral")
@@ -5508,16 +5574,12 @@ local function sendChat(text)
         return general:SendAsync(text)
     end, 3, current)
     if not ok then Runtime.lastChatError = tostring(message) return false, Runtime.lastChatError end
-    if not current() then Runtime.lastChatError = "CHAT CANCELLED" return false, Runtime.lastChatError end
+    if not current() then return false, "CHAT CANCELLED" end
     local statusOK, status = pcall(function() return message and message.Status end)
-    if statusOK and status == Enum.TextChatMessageStatus.Success then
-        Runtime.lastChatError = nil
-        return true
-    end
+    if statusOK and status == Enum.TextChatMessageStatus.Success then Runtime.lastChatError=nil return true end
     Runtime.lastChatError = statusOK and tostring(status or "CHAT UNAVAILABLE") or "CHAT STATUS UNAVAILABLE"
     return false, Runtime.lastChatError
 end
-
 
 --============================================================
 -- GUI MAIN
@@ -5529,6 +5591,7 @@ setBoot(
 )
 
 
+if not Runtime.alive() then return end
 Gui =
     Instance.new(
         "ScreenGui"
@@ -6796,49 +6859,11 @@ local AllowEstimatedOwnPetsToggle = button(TestCanvas, "UNKNOWN PRICES: BLOCKED"
     UDim2.new(1, -24, 0, 22), UDim2.fromOffset(10, 108))
 AllowEstimatedOwnPetsToggle.Active, AllowEstimatedOwnPetsToggle.AutoButtonColor = false, false
 
-local function settingInput(
-    title,
-    value,
-    y
-)
-
-    label(
-        TestCanvas,
-        title,
-
-        UDim2.fromOffset(
-            210,
-            30
-        ),
-
-        UDim2.fromOffset(
-            12,
-            y
-        ),
-
-        Enum.Font.GothamBold,
-        10,
-        C.MUTED
-    )
-
-    return
-        textBox(
-            TestCanvas,
-            value,
-            "",
-
-            UDim2.fromOffset(
-                110,
-                30
-            ),
-
-            UDim2.fromOffset(
-                245,
-                y
-            )
-        )
+local function settingInput(title,value,y)
+    local caption=label(TestCanvas,title,UDim2.new(.58,-18,0,30),UDim2.fromOffset(12,y),Enum.Font.GothamBold,10,C.MUTED)
+    caption.TextWrapped=true
+    return textBox(TestCanvas,value,"",UDim2.new(.42,-18,0,30),UDim2.new(.58,6,0,y))
 end
-
 
 local RefreshMinutesInput =
     settingInput(
@@ -6953,12 +6978,7 @@ local function bindNumber(
                 return
             end
 
-            Settings[key] =
-                math.clamp(
-                    value,
-                    min,
-                    max
-                )
+            Settings[key] = Runtime.numberValue(key, value, min, max)
 
             input.Text =
                 tostring(
@@ -9163,6 +9183,7 @@ local PlayerCooldowns =
 
 
 local function resetState()
+    State.noStockStarted = nil
     Runtime.potionAddonPlan = nil
     State.firstAcceptObserved, State.firstAcceptSentAt, State.emptyTheirSince = nil, nil, nil
     InventoryFlow.stop("trade state reset")
@@ -9248,6 +9269,7 @@ local function resetState()
         false
 
     State.showcaseFinished = nil
+    State.showcaseAttempts, State.showcaseStockSignature = nil, nil
     State.showcaseTried =
         {}
 end
@@ -9328,7 +9350,7 @@ local function sendTrade(player)
         if not allowed() or getTrade() then return false end
         local ok, result = remoteCall(TradeRemote.SendRequest, argument)
         if not allowed() then return false end
-        if ok then return result ~= false end
+        if ok and result ~= false then return true end
         if result == "REMOTE TIMEOUT" or result == "REMOTE CANCELLED" or result == "REMOTE BUSY" then return false end
     end
     return false
@@ -9390,6 +9412,7 @@ function Runtime.observeFirstAccept(trade, mine)
             State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
         end
         State.firstAcceptObserved = true
+        if Runtime.acceptPending then Runtime.acceptPending.observed=true end
     elseif State.firstAcceptObserved then
         -- This is an observed true -> false transition, not a pending RPC.
         Runtime.clearAcceptState()
@@ -9456,6 +9479,92 @@ local function decline()
     return State.declineSent
 end
 
+-- Cancellation is kept separate from GUI and ordinary Runtime cleanup.
+function Runtime.beginAcceptanceCancellation(reason, expectedContext)
+    local live = getTrade()
+    local mine, _, _, partner = getTradeSides(live)
+    local key = Runtime.tradeKey(live, partner)
+    if not mine or not key or (expectedContext and expectedContext.key ~= key) then return end
+    local request = Runtime.acceptPending
+    if not accepted(mine) and not Runtime.tradeInConfirmation(live)
+        and not (request and request.key == key and request.started) and not State.firstAcceptSentAt then return end
+    local existing = ENV.__AM_ANALYZER_CANCELLATION
+    if existing and existing.key == key then Runtime.stopAcceptance=existing existing.tick() return end
+    local native = Runtime.nativeTask or task
+    local uncertain = request and request.key == key and request.started and not request.observed
+    local pending = {key=key, since=os.clock(), reason=reason, calls={}, mustClose=uncertain==true, riskUntil=uncertain and math.max(os.clock()+12,request.expires) or os.clock()+12}
+    ENV.__AM_ANALYZER_CANCELLATION, Runtime.stopAcceptance = pending, pending
+    local function current()
+        if ENV.__AM_ANALYZER_CANCELLATION ~= pending then return nil end
+        local trade = getTrade()
+        local own, _, _, other = getTradeSides(trade)
+        if not own or Runtime.tradeKey(trade, other) ~= pending.key then return nil end
+        return trade, own
+    end
+    local function finish()
+        if ENV.__AM_ANALYZER_CANCELLATION == pending then ENV.__AM_ANALYZER_CANCELLATION=nil end
+        if Runtime.stopAcceptance == pending then Runtime.stopAcceptance=nil end
+    end
+    local function issue(operation)
+        local remote = TradeRemote[operation]
+        if not remote then return end
+        local previous = pending.calls[operation]
+        if previous and ((not previous.done and os.clock()-previous.since<30) or os.clock()-previous.since<2) then return end
+        local call = {since=os.clock(), done=false}
+        pending.calls[operation] = call
+        local function invoke()
+            if not current() then call.done=true return end
+            pcall(function()
+                if typeof(remote) == "Instance" then
+                    if remote:IsA("RemoteEvent") then remote:FireServer()
+                    elseif remote:IsA("RemoteFunction") then remote:InvokeServer() end
+                elseif type(remote) == "function" then remote()
+                elseif type(remote) == "table" then
+                    if type(remote.FireServer) == "function" then remote:FireServer()
+                    elseif type(remote.InvokeServer) == "function" then remote:InvokeServer() end
+                end
+            end)
+            call.done = true
+        end
+        if type(native.spawn) == "function" then native.spawn(invoke)
+        else local co=coroutine.create(invoke) coroutine.resume(co) end
+    end
+    function pending.tick()
+        local trade, own = current()
+        if not trade then finish() return end
+        local isAccepted = accepted(own) or Runtime.tradeInConfirmation(trade)
+        if not pending.mustClose and not isAccepted and os.clock() >= pending.riskUntil then finish() return end
+        if os.clock()-pending.since >= 12 then issue("Decline")
+        elseif isAccepted then issue("Unaccept") end
+        trade, own = current()
+        if not trade or (not pending.mustClose and not accepted(own) and not Runtime.tradeInConfirmation(trade) and os.clock()>=pending.riskUntil) then finish() end
+    end
+    pending.tick()
+    if ENV.__AM_ANALYZER_CANCELLATION == pending and type(native.spawn) == "function" then
+        native.spawn(function()
+            while ENV.__AM_ANALYZER_CANCELLATION == pending do
+                pending.tick()
+                if ENV.__AM_ANALYZER_CANCELLATION == pending then native.wait(.25) end
+            end
+        end)
+    end
+end
+
+function Runtime.requestStopAcceptance()
+    Runtime.beginAcceptanceCancellation("Auto Trade disabled")
+end
+
+function Runtime.finishStopAcceptance()
+    local pending = ENV.__AM_ANALYZER_CANCELLATION
+    if pending then pending.tick() end
+end
+
+function Runtime.cancellationPending(key)
+    Runtime.finishStopAcceptance()
+    local pending = ENV.__AM_ANALYZER_CANCELLATION
+    return pending and pending.key == key
+end
+
 function Runtime.pruneDisallowed(trade)
     local context = Runtime.captureTrade(trade)
     local live, _, mine = Runtime.liveContext(context, true, true)
@@ -9464,13 +9573,19 @@ function Runtime.pruneDisallowed(trade)
         Runtime.potionAddonPlan = nil
         State.optimizedSignature, State.optimizedOurSignature = nil, nil
     end
-    local remove = {}
+    local remove, keep = {}, {}
     for _, item in pairs(getOfferItems(mine)) do
         local data = effectiveItemValue(item)
         local belowMinimum = data.known and not data.newIgnored and data.value < activeMinItemValue("mine")
-            and not CommonPetFilter.shouldBypassOurMinimum(item)
-        if not isAllowed(data.name, item) or belowMinimum then remove[#remove + 1] = tostring(itemUID(item)) end
+            and not Runtime.bypassOwnMinimum(item, data.name)
+        if not isAllowed(data.name, item) or belowMinimum or not data.known or data.newIgnored
+            or data.estimated or DemandPolicy.ownAnalysisReason(data.analysis) or itemLocked(item) then
+            remove[#remove + 1] = tostring(itemUID(item))
+        else keep[#keep+1] = {uid=tostring(itemUID(item)), value=data.value} end
     end
+    table.sort(keep, function(a,b) if a.value==b.value then return a.uid<b.uid end return a.value>b.value end)
+    local limit=math.clamp(math.floor(num(Settings.maxOurItems) or 18),1,18)
+    for n=limit+1,#keep do remove[#remove+1]=keep[n].uid end
     if #remove == 0 then return true end
     if not unaccept(mine) then return false end
     for _, uid in ipairs(remove) do
@@ -9479,11 +9594,22 @@ function Runtime.pruneDisallowed(trade)
         if not live or Runtime.tradeInConfirmation(live) or accepted(mine) then return false end
         local ok, result = removeOurItem(uid)
         if not Runtime.liveContext(context, false, true) or not ok or result == false then return false end
+        local observed = false
+        for _ = 1, 31 do
+            live, _, mine = Runtime.liveContext(context, false, true)
+            if not live or Runtime.tradeInConfirmation(live) or accepted(mine) then return false end
+            if not currentUIDSet(mine)[uid] then observed = true break end
+            Runtime.task.wait(.1)
+        end
+        if not observed then setTestStatus("REMOVE NOT OBSERVED • RETRY", C.YELLOW) return false end
     end
-    State.optimizedSignature, State.acceptReadySignature, State.acceptReadySince = nil, nil, nil
+    State.optimizedSignature, State.optimizedOurSignature = nil, nil
+    State.acceptReadySignature, State.acceptReadySince = nil, nil
     State.changedAt = os.clock()
-    return false -- fetch the replicated offer on the next controller iteration
+    return false
 end
+
+
 
 --============================================================
 -- TRADE EVALUATION
@@ -9564,6 +9690,11 @@ local function evaluateTrade(
             nil,
     }
 
+    if mine.integrityError or theirs.integrityError then
+        result.blocked, result.reason = true, "DUPLICATE ITEM UID"
+        return result
+    end
+
     if
         mine.hardBlocked > 0 or theirs.hardBlocked > 0
     then
@@ -9575,6 +9706,21 @@ local function evaluateTrade(
             "BLOCKED ITEM • TRIKE STROLLER"
 
         return result
+    end
+
+    if Settings.autoTrade then
+        if countOfferItems(myOffer) > math.clamp(math.floor(num(Settings.maxOurItems) or 18), 1, 18) then
+            result.blocked, result.reason = true, "OUR OFFER EXCEEDS MAX ITEMS"
+            return result
+        end
+        for _, offer in ipairs({myOffer, theirOffer}) do
+            for _, item in pairs(getOfferItems(offer)) do
+                if not Runtime.instanceUID(item) then
+                    result.blocked, result.reason = true, "MISSING UNIQUE ITEM ID"
+                    return result
+                end
+            end
+        end
     end
 
     if Settings.autoTrade and AMVGG.dataStale then
@@ -9756,6 +9902,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
     local context = Runtime.captureTrade(trade)
     local live, _, mine, theirs = Runtime.liveContext(context, true, true)
     if not live or fullSignature(mine, theirs) ~= fullSignature(myOffer, theirOffer) then return false end
+    if Runtime.cancellationPending(context and context.key) then return false end
     if State.declineRequested then return false end
     if State.unacceptRequired then unaccept(mine) return false end
     Runtime.observeFirstAccept(live, mine)
@@ -9764,7 +9911,16 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         Runtime.revalidatePotionPlan(live, mine, theirs)
     end
     local evaluation = evaluateTrade(mine, theirs)
+    live, _, mine, theirs = Runtime.liveContext(context, true, true)
+    if not live or not Settings.autoTrade or Runtime.cancellationPending(context.key) then return false end
     if evaluation.blocked or not evaluation.valid then unaccept(mine) return false end
+    local proof = Runtime.ownOfferProof(context, mine)
+    if not proof then
+        live, _, mine = Runtime.liveContext(context, true, true)
+        if live then unaccept(mine) end
+        return false
+    end
+    if not Runtime.liveContext(context, true, true) then return false end
     local signature = fullSignature(mine, theirs)
 
     if Runtime.tradeInConfirmation(live) then
@@ -9784,7 +9940,11 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         live, _, mine, theirs = Runtime.liveContext(context, true, true)
         if not live or not Runtime.tradeInConfirmation(live) or State.unacceptRequired or State.declineRequested then return false end
         local final = evaluateTrade(mine, theirs)
+        live, _, mine, theirs = Runtime.liveContext(context, true, true)
+        if not live or not Settings.autoTrade or Runtime.cancellationPending(context.key) then return false end
         if final.blocked or not final.valid then unaccept(mine) return false end
+        proof = Runtime.ownOfferProof(context, mine)
+        if not proof then if Runtime.liveContext(context,true,true) then unaccept(mine) end return false end
         if confirmed(mine) then State.confirmPending = nil return true end
         local pending = State.confirmPending
         if pending and (pending.key ~= context.key or pending.signature ~= signature) then
@@ -9805,7 +9965,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if not TradeRemote.Confirm then return false end
         if not pending then pending = {key=context.key, signature=signature, since=os.clock()} State.confirmPending = pending end
         pending.lastAttempt = os.clock()
-        local ok, result = remoteCall(TradeRemote.Confirm)
+        local ok, result = Runtime.invokeRemote(TradeRemote.Confirm, {context=context, proof=proof})
         if not Runtime.liveContext(context, true, true) then return false end
         if not ok or result == false then testLog("CONFIRM FAILED") return false end
         if State.confirmPending ~= pending then return false end
@@ -9821,9 +9981,17 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
             return true
         end
         if not TradeRemote.Accept then return false end
-        local ok, result = remoteCall(TradeRemote.Accept)
+        if not Runtime.liveContext(context, true, true) or not Runtime.ownProofCurrent(proof,mine) then return false end
+        local request = {key=context.key, signature=signature, since=os.clock(), expires=os.clock()+30}
+        Runtime.acceptPending = request
+        local ok, result = Runtime.invokeRemote(TradeRemote.Accept, {context=context, proof=proof, acceptRecord=request})
+        request.done, request.acknowledged = true, ok and result ~= false
+        if not request.started or (ok and result==false) then
+            if Runtime.acceptPending == request then Runtime.acceptPending=nil end
+        end
         local current, _, freshMine = Runtime.liveContext(context, true, true)
         if not current then
+            if request.started then Runtime.beginAcceptanceCancellation("Accept interrupted", context) end
             -- If the same trade survived but changed during the reply, require
             -- an observed first-stage reset before any later confirmation.
             local changed = getTrade()
@@ -9835,6 +10003,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
             return false
         end
         if not ok or result == false then
+            if request.started and not ok then Runtime.beginAcceptanceCancellation("Accept result unknown", context) end
             Runtime.clearAcceptState()
             testLog("FIRST ACCEPT FAILED")
             return false
@@ -9856,38 +10025,44 @@ end
 --============================================================
 
 local function showcase(myOffer)
-    if countOfferItems(myOffer) > 0 then return true, "OBSERVED" end
-    if not TradeRemote.Add then return false, "REMOTE MISSING" end
-    local context = Runtime.captureTrade(getTrade())
-    if not context or not Runtime.liveContext(context, true, true) then return false, "TRADE_CHANGED" end
-    local pending = State.showcasePending
+    if countOfferItems(myOffer)>0 then return true,"OBSERVED" end
+    if not TradeRemote.Add then return false,"REMOTE MISSING" end
+    local context=Runtime.captureTrade(getTrade())
+    if not context or not Runtime.liveContext(context,true,true) then return false,"TRADE_CHANGED" end
+    local pending=State.showcasePending
     if pending then
-        if pending.key ~= context.key then State.showcasePending = nil return false, "TRADE_CHANGED" end
-        local mine = getTradeSides(getTrade())
-        if currentUIDSet(mine)[pending.uid] then State.showcasePending = nil return true, "OBSERVED" end
-        if os.clock() - pending.since < 4 then return false, "PENDING" end
-        State.showcasePending = nil
-        testLog("SHOWCASE NOT OBSERVED; TRY NEXT SAFE ITEM")
+        if pending.key~=context.key then State.showcasePending=nil return false,"TRADE_CHANGED" end
+        local mine=getTradeSides(getTrade())
+        if currentUIDSet(mine)[pending.uid] then State.showcasePending=nil return true,"OBSERVED" end
+        if os.clock()<pending.untilAt then return false,"PENDING" end
+        local tried=State.showcaseAttempts and State.showcaseAttempts[pending.uid]
+        if tried then tried.nextAt=math.max(tried.nextAt,os.clock()+2) end
+        State.showcasePending=nil
     end
-    if State.showcaseAttemptAt and os.clock() - State.showcaseAttemptAt < 0.75 then return false, "PENDING" end
-    for _, item in ipairs(valuedInventory()) do
-        local uid = tostring(item.uid)
-        if not State.showcaseTried[uid] then
-            State.showcaseTried[uid] = true
-            State.showcaseAttemptAt = os.clock()
-            testLog("SHOWCASE", item.name, item.variant, "=", valueText(item.value))
-            local ok, result = addOurItem(item.uid)
-            if not Runtime.liveContext(context, false, true) then return false, "TRADE_CHANGED" end
-            if not ok or result == false then return false, "FAILED" end
-            local mine = getTradeSides(getTrade())
-            if currentUIDSet(mine)[uid] then return true, "OBSERVED" end
-            State.showcasePending = {key=context.key, uid=uid, since=os.clock()}
-            return false, "PENDING"
+    State.showcaseAttempts=State.showcaseAttempts or {}
+    local waiting=false
+    for _,candidate in ipairs(valuedInventory()) do
+        if not Runtime.liveContext(context,true,true) then return false,"TRADE_CHANGED" end
+        local uid=tostring(candidate.uid)
+        local attempt=State.showcaseAttempts[uid] or {count=0,nextAt=0}
+        if attempt.count<3 then
+            if os.clock()<attempt.nextAt then waiting=true
+            else
+                attempt.count+=1 attempt.nextAt=os.clock()+2
+                State.showcaseAttempts[uid]=attempt
+                State.showcaseTried[uid]=true
+                local ok,result=addOurItem(candidate.uid)
+                if not Runtime.liveContext(context,false,true) then return false,"TRADE_CHANGED" end
+                local mine=getTradeSides(getTrade())
+                if currentUIDSet(mine)[uid] then return true,"OBSERVED" end
+                if ok and result~=false then State.showcasePending={key=context.key,uid=uid,untilAt=os.clock()+4}
+                elseif Runtime.uncertainResult(result) then State.showcasePending={key=context.key,uid=uid,untilAt=os.clock()+30} end
+                return false,ok and result~=false and "PENDING" or "FAILED"
+            end
         end
     end
-    return false, "EXHAUSTED"
+    return false,waiting and "PENDING" or "EXHAUSTED"
 end
-
 
 testLog(
     "SETTINGS AUTO TRADE READY",
@@ -9952,6 +10127,11 @@ testLog(
 
 -- Only the greeting and native quick-chat messages remain here.
 -- No partner inventory request, inventory observer or Suggest Item worker.
+function Runtime.uncertainResult(reason)
+    reason=tostring(reason or "")
+    return reason:find("TIMEOUT",1,true)~=nil or reason:find("CANCEL",1,true)~=nil or reason:find("BUSY",1,true)~=nil
+end
+
 InventoryFlow = {}
 do
     local MainState = State
@@ -9960,7 +10140,7 @@ do
     ENV.__AM_ANALYZER_INVENTORY_FLOW = InventoryFlow
     Runtime.flow = InventoryFlow
     function InventoryFlow.stop()
-        InventoryFlow.greetedTrade = nil
+        InventoryFlow.greetedTrade, InventoryFlow.greetingAttempt = nil, nil
     end
     function InventoryFlow.engaged() return false end
     function InventoryFlow.holdAccept() return false end
@@ -9973,43 +10153,62 @@ local function identity(value)
     end
 end
 
-    function InventoryFlow.sendQuickChat(partner, index, fallback)
-        if not Settings.autoTrade or not Settings.chatRequests then return false end
+    function InventoryFlow.sendQuickChat(partner,index,fallback)
+        if not Settings.autoTrade or not Settings.chatRequests then return false,"CHAT CANCELLED" end
+        local live=getTrade()
+        local context=live and Runtime.captureTrade(live)
+        if not context or not Runtime.liveContext(context,false,false) then return false,"CHAT CANCELLED" end
         if TradeRemote.QuickChat then
-            local live = getTrade()
-            if not live then return false end
-            local _, _, _, other = getTradeSides(live)
-            local id, name = identity(partner)
-            local liveID = identity(other)
-            if not live or not id or liveID ~= id
-                or tostring(live.trade_id or live.id or playerName(other)) ~= MainState.tradeID then return false end
-            local target = typeof(partner) == "Instance" and partner
-                or (name and Players:FindFirstChild(name)) or Players:GetPlayerByUserId(id)
-            if not target or target.ClassName ~= "Player" or target.UserId ~= id then return false end
-            -- Captured native signature: SendQuickChat(partner Player, emoji index).
-            local ok, result = remoteCall(TradeRemote.QuickChat, target, index)
-            if ok and result ~= false then return true end
+            local _,_,_,other=getTradeSides(live)
+            local id,name=identity(partner)
+            if not id or identity(other)~=id or Runtime.tradeID(live)~=MainState.tradeID then return false,"CHAT CANCELLED" end
+            local target=typeof(partner)=="Instance" and partner or (name and Players:FindFirstChild(name)) or Players:GetPlayerByUserId(id)
+            if not target or target.ClassName~="Player" or target.UserId~=id then return false,"CHAT TARGET UNAVAILABLE" end
+            local ok,result=Runtime.invokeRemote(TradeRemote.QuickChat,{context=context,mine=false,prices=false},target,index)
+            if ok and result~=false then return true end
+            if Runtime.uncertainResult(result) or not Runtime.liveContext(context,false,false) then return false,result end
         end
-        return sendChat(fallback)
+        if not Runtime.liveContext(context,false,false) or not Settings.autoTrade then return false,"CHAT CANCELLED" end
+        return sendChat(fallback,context)
     end
 
-
-    function InventoryFlow.step(trade, partner)
+    function InventoryFlow.step(trade,partner)
         if not Settings.autoTrade or not Settings.chatRequests then return false end
-        local key = MainState.tradeID
-        if not key or InventoryFlow.greetedTrade == key then return false end
-        if os.clock() - (MainState.tradeStarted or os.clock()) < 3 then return false end
-        local context = Runtime.captureTrade(trade)
-        if not Runtime.liveContext(context, true, true) then return false end
-        -- Mark before the call: a yielding remote cannot duplicate the greeting.
-        InventoryFlow.greetedTrade = key
-        InventoryFlow.sendQuickChat(partner, 1, "👋 Lets, trade")
+        local key=MainState.tradeID
+        if not key or InventoryFlow.greetedTrade==key then return false end
+        if os.clock()-(MainState.tradeStarted or os.clock())<3 then return false end
+        local context=Runtime.captureTrade(trade)
+        if not Runtime.liveContext(context,true,true) then return false end
+        local attempt=InventoryFlow.greetingAttempt
+        if not attempt or attempt.key~=key then attempt={key=key,count=0,nextAt=0} InventoryFlow.greetingAttempt=attempt end
+        if attempt.busy or attempt.uncertain or attempt.count>=3 or os.clock()<attempt.nextAt then return false end
+        attempt.busy=true attempt.count+=1 attempt.nextAt=os.clock()+2
+        local ok,reason=InventoryFlow.sendQuickChat(partner,1,"👋 Lets, trade")
+        attempt.busy=false
+        if not Runtime.liveContext(context,true,true) then return false end
+        if ok then InventoryFlow.greetedTrade=key
+        elseif Runtime.uncertainResult(reason) then attempt.uncertain=true end
         return false
     end
+
+
 end
 
 
+function Runtime.waitForPotionStock()
+    State.noStockStarted = State.noStockStarted or os.clock()
+    State.optimizedSignature, State.optimizedOurSignature = nil, nil
+    State.askStarted, State.askSignature = nil, nil
+    local remaining = math.max(0, 30 - (os.clock() - State.noStockStarted))
+    setTestStatus(string.format("NO AVAILABLE RIDE / FLY POTIONS • %.0fs", remaining), C.YELLOW)
+    if remaining <= 0 then decline() end
+end
+
 local function manageAutoTrade(trade)
+    if not Runtime.tradeID(trade) then
+        setTestStatus("AUTO BLOCKED • MISSING TRADE ID", C.RED)
+        return
+    end
     local operationContext = Runtime.captureTrade(trade)
     if not Runtime.liveContext(operationContext, true, false) then return end
 
@@ -10029,14 +10228,11 @@ local function manageAutoTrade(trade)
         return
     end
 
-    local id =
-        tostring(
-            trade.trade_id
-            or trade.id
-            or playerName(
-                partner
-            )
-        )
+    local id = Runtime.tradeID(trade)
+    if not id then
+        setTestStatus("AUTO BLOCKED • MISSING TRADE ID", C.RED)
+        return
+    end
 
     if playerName(partner) == LocalPlayer.Name or (State.tradeID == id and State.partner and playerName(State.partner) ~= playerName(partner)) then
         InventoryFlow.stop("partner changed inside current trade")
@@ -10234,7 +10430,10 @@ local function manageAutoTrade(trade)
     State.lastOurSignature =
         ourSignature
 
-    if AMVGG.loading or not AMVGG.ready then setTestStatus("WAIT AMVGG", C.YELLOW) return end
+    if AMVGG.loading or not AMVGG.ready then
+        Runtime.beginAcceptanceCancellation("Prices unavailable", operationContext)
+        setTestStatus("WAIT AMVGG", C.YELLOW) return
+    end
     if AMVGG.dataStale then
         InventoryFlow.stop("Price refresh failed")
         unaccept(myOffer)
@@ -10262,6 +10461,13 @@ local function manageAutoTrade(trade)
             theirOffer
         )
 
+    if myCount==0 and State.showcaseFinished and State.optimizedSignature==nil then
+        local stock=Runtime.inventorySignature()
+        if stock~=State.showcaseStockSignature then
+            State.showcaseFinished=false State.showcaseAttempts={} State.showcaseTried={}
+            State.waitForFirstAt,State.showcaseAddedAt,State.initialAsk=nil,nil,nil
+        end
+    end
     if myCount > 0 or State.optimizedSignature ~= nil then State.showcaseFinished = true end
 
     -- SHOW MOST EXPENSIVE SAFE ITEM, BUT DO NOT EXPOSE IT INSTANTLY.
@@ -10304,7 +10510,9 @@ local function manageAutoTrade(trade)
         )
 
         local added, showcaseReason = showcase(myOffer)
-        if added or showcaseReason == "EXHAUSTED" then State.showcaseFinished = true end
+        if added or showcaseReason == "EXHAUSTED" then
+            State.showcaseFinished=true State.showcaseStockSignature=Runtime.inventorySignature()
+        end
         if showcaseReason == "EXHAUSTED" and not State.waitForFirstAt then State.waitForFirstAt = os.clock() end
         if added and not State.showcaseAddedAt then
             State.showcaseAddedAt =
@@ -10320,6 +10528,16 @@ local function manageAutoTrade(trade)
 
         return
     end
+
+    if Settings.ownPotionsOnly == true and myCount == 0 then
+        local available = Runtime.potionWaitingOffer()
+        if #available == 0 then
+            Runtime.waitForPotionStock()
+            return
+        end
+    end
+
+    State.noStockStarted = nil
 
     -- If the client replicated our showcase between loops before we recorded
     -- the timestamp, start the first-item window now rather than from trade start.
@@ -10716,13 +10934,24 @@ local function manageAutoTrade(trade)
             State.optimizedSignature = nil
             return
         end
+        -- Keep a safe potion visible while asking for a better incoming offer.
+        -- This is a display fallback only: evaluateTrade and secureAccept still
+        -- enforce the full demand cap before Accept and before Confirm.
+        if Settings.ownPotionsOnly == true and #desired == 0 then
+            desired, ourValue = Runtime.potionWaitingOffer()
+            if not Runtime.liveContext(operationContext, true, true) then return end
+            if #desired == 0 then
+                Runtime.waitForPotionStock()
+                return
+            end
+        end
         if
             #desired > 0
             and ourValue > 0
         then
 
             testLog(
-                "BALANCE TO DEMAND CAP",
+                ourValue > cap + 0.000000001 and "WAITING POTION • ASK ADD" or "BALANCE TO DEMAND CAP",
                 "THEM=",
                 valueText(
                     evaluation.theirs.total
@@ -11106,6 +11335,15 @@ local function runAutoTrade()
         return
     end
 
+    local preflightGeneration=AutoTradeGeneration
+    if AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then setTestStatus("WAIT AMVGG",C.YELLOW) return end
+    local available=Settings.ownPotionsOnly and Runtime.potionWaitingOffer() or valuedInventory()
+    if not Settings.autoTrade or preflightGeneration~=AutoTradeGeneration or not Runtime.alive() or getTrade() then return end
+    if #available==0 then
+        setTestStatus(Settings.ownPotionsOnly and "NO AVAILABLE RIDE / FLY POTIONS • NO REQUEST" or "NO SAFE ITEMS • NO REQUEST",C.YELLOW)
+        return
+    end
+
     local target =
         randomPlayer()
 
@@ -11466,6 +11704,7 @@ Runtime.task.spawn(
 
                         else
 
+                            Runtime.finishStopAcceptance()
                             InventoryFlow.stop("Auto Trade disabled")
                             setTestStatus(
                                 "OFF",
@@ -11654,3 +11893,4 @@ Runtime.task.delay(
         end
     end
 )
+Runtime.initializingThread = nil
