@@ -41,7 +41,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.43"
+    "11.7.44"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -55,7 +55,7 @@ print(
 )
 
 print(
-    "[AM V" .. VERSION .. "] POTION FIRST + DEMAND 10/15/20 (0.15pp TOLERANCE) + PROTECTED OUR 3 STAR PETS"
+    "[AM V" .. VERSION .. "] NORMAL TRADE + DEMAND 10/15/20 (0.15pp TOLERANCE) + PROTECTED OUR 3 STAR PETS"
 )
 
 
@@ -2964,8 +2964,6 @@ local FIRST_SEEN_FILE =
 
 local Settings = {
 
-    ownPotionsOnly = false,
-
     autoTrade =
         false,
 
@@ -3488,7 +3486,7 @@ function Runtime.policySignature()
     local keys = {
         "allowedItems", "minValueMode", "allMinItemValue", "myMinItemValue", "theirMinItemValue",
         "itemMinimumWinPercent", "newItemHours", "blockEstimated", "allowEstimatedOwnPets",
-        "excludeUnwantedIncomingNoPotion", "minProfitPercent", "maxOurItems", "optimizerBeam", "ownPotionsOnly",
+        "excludeUnwantedIncomingNoPotion", "minProfitPercent", "maxOurItems", "optimizerBeam",
     }
     local values = {}
     for _, key in ipairs(keys) do values[#values + 1] = key .. "=" .. tostring(Settings[key]) end
@@ -3497,7 +3495,6 @@ end
 
 function Runtime.disableAutomation()
     Runtime.settingsLocalOverrides.autoTrade = false
-    Runtime.potionAddonPlan = nil
     AutoTradeGeneration += 1
     if Runtime.flow then Runtime.flow.stop("Auto Trade disabled") end
     local state = Runtime.state
@@ -5050,54 +5047,16 @@ local function parseAllowed()
 end
 
 
-function Runtime.isTradePotion(name)
-    local key = normalize(name)
-    return key == normalize("Ride-A-Pet Potion") or key == normalize("Fly-A-Pet Potion")
-end
-
-function Runtime.bypassOwnMinimum(item, name)
+function Runtime.bypassOwnMinimum(item)
     return CommonPetFilter.shouldBypassOurMinimum(item)
-        or (Settings.ownPotionsOnly == true and Runtime.isTradePotion(name or getItemName(item)))
 end
 
-function Runtime.potionItemKey(item)
-    return tostring(itemUID(item)) .. ":" .. tostring(item.kind) .. ":" .. tostring(item.category) .. ":" .. getVariant(item)
-end
 
-function Runtime.potionAddonAllowed(item)
-    local plan = Runtime.potionAddonPlan
-    if not item or not plan or Settings.ownPotionsOnly ~= true then return false end
-    if not Runtime.liveContext(plan.context, false, true) then return false end
-    return plan.addons[tostring(itemUID(item))] == Runtime.potionItemKey(item)
-end
-
-function Runtime.potionBasePresent(offer)
-    local plan = Runtime.potionAddonPlan
-    if not plan or not Runtime.liveContext(plan.context, false, true) then return false end
-    local present = {}
-    for _, item in pairs(getOfferItems(offer)) do present[tostring(itemUID(item))] = Runtime.potionItemKey(item) end
-    local count = 0
-    for uid, signature in pairs(plan.base) do
-        count += 1
-        if present[uid] ~= signature then return false end
-    end
-    return count > 0
-end
-
-local function isAllowed(name, item, selectingAddons)
-
-    if Settings.ownPotionsOnly == true and not Runtime.isTradePotion(name)
-        and selectingAddons ~= true and not Runtime.potionAddonAllowed(item) then
-        return false
-    end
+local function isAllowed(name)
 
     if HARD_BLOCKED_ITEMS[normalize(name)] then
         return false
     end
-
-    -- This dedicated mode explicitly enables both real potions even when
-    -- the normal pet allow-list is populated. Filler items still use that list.
-    if Settings.ownPotionsOnly == true and Runtime.isTradePotion(name) then return true end
 
     local allowed =
         parseAllowed()
@@ -5117,7 +5076,7 @@ local function isAllowed(name, item, selectingAddons)
 end
 
 
-local function valuedInventory(selectingAddons)
+local function valuedInventory()
     local operation = getTrade() and Runtime.captureTrade(getTrade())
     local prices, generation, scanned = AMVGG.version, AutoTradeGeneration, 0
 
@@ -5173,7 +5132,7 @@ local function valuedInventory(selectingAddons)
             )
             and DemandPolicy.ownAnalysisReason(data.analysis) == nil
 
-            and isAllowed(data.name, item, selectingAddons)
+            and isAllowed(data.name, item)
         then
 
             result[
@@ -5501,59 +5460,6 @@ end
 -- OFFER CONTROL
 --============================================================
 
-function Runtime.optimizeOwnOffer(cap)
-    Runtime.potionAddonPlan = nil
-    if not Settings.ownPotionsOnly then return optimizeOurOffer(cap) end
-    local context = Runtime.captureTrade(getTrade())
-    if not Runtime.liveContext(context, true, true) then return {}, 0, cap, "TRADE_CHANGED" end
-    local potions = {}
-    for _, candidate in ipairs(valuedInventory()) do
-        if Runtime.isTradePotion(candidate.name) then potions[#potions + 1] = candidate end
-    end
-    -- Potion selection always comes first. Never replace a potion with a pet.
-    local base, total, _, failure = optimizeOurOffer(cap, potions)
-    if failure or not Runtime.liveContext(context, true, true) then return {}, 0, cap, failure or "TRADE_CHANGED" end
-    if #base == 0 then return base, total, cap end
-    local slots = math.clamp(math.floor(tonumber(Settings.maxOurItems) or 18), 1, 18) - #base
-    local remaining = cap - total
-    if slots <= 0 or remaining <= 0.000000001 then return base, total, cap end
-    local used = {}
-    for _, candidate in ipairs(base) do used[candidate.uid] = true end
-    for _, candidate in ipairs(potions) do
-        if not used[candidate.uid] and candidate.value <= remaining + 0.000000001 then
-            -- If the bounded search left a potion that still fits, no pet fallback.
-            return base, total, cap
-        end
-    end
-    local fillers = {}
-    for _, candidate in ipairs(valuedInventory(true)) do
-        if not Runtime.isTradePotion(candidate.name) then fillers[#fillers + 1] = candidate end
-    end
-    local adds, addValue, _, addFailure = optimizeOurOffer(remaining, fillers, slots)
-    if addFailure or not Runtime.liveContext(context, true, true) then return {}, 0, cap, addFailure or "TRADE_CHANGED" end
-    if #adds == 0 then return base, total, cap end
-    local plan = {context=context, base={}, addons={}}
-    for _, candidate in ipairs(base) do plan.base[candidate.uid] = Runtime.potionItemKey(candidate.item) end
-    for _, candidate in ipairs(adds) do
-        plan.addons[candidate.uid] = Runtime.potionItemKey(candidate.item)
-        base[#base + 1] = candidate
-    end
-    Runtime.potionAddonPlan = plan
-    return base, total + addValue, cap
-end
-
-
-function Runtime.potionWaitingOffer()
-    local cheapest
-    for _, candidate in ipairs(valuedInventory()) do
-        if Runtime.isTradePotion(candidate.name) and (not cheapest or candidate.value < cheapest.value) then
-            cheapest = candidate
-        end
-    end
-    if cheapest then return {cheapest}, cheapest.value end
-    return {}, 0
-end
-
 local function addOurItem(uid)
 
     if not TradeRemote.Add then
@@ -5568,10 +5474,6 @@ local function addOurItem(uid)
         if tostring(itemUID(item)) == tostring(uid) then
             local data = effectiveItemValue(item)
             if not isAllowed(data.name, item) then return false, "OUR ITEM NOT ALLOWED" end
-            if Settings.ownPotionsOnly and not Runtime.isTradePotion(data.name) then
-                local mine = getTradeSides(getTrade())
-                if not Runtime.potionBasePresent(mine) then return false, "POTION BASE MISSING" end
-            end
             if not data.known or data.newIgnored or data.estimated or data.value <= 0 then return false, "EXACT SAFE VALUE REQUIRED" end
             if data.value < activeMinItemValue("mine") and not Runtime.bypassOwnMinimum(item, data.name) then return false, "OUR ITEM < MIN VALUE" end
             local reason = DemandPolicy.ownItemReason(item)
@@ -6928,7 +6830,7 @@ TestCanvas.Size =
         1,
         -10,
         0,
-        1640
+        1568
     )
 
 TestCanvas.BackgroundTransparency =
@@ -7842,23 +7744,6 @@ do
         "ITEM MINIMUM WIN %", Settings.itemMinimumWinPercent, 1506
     )
     bindNumber(ItemMinimumWinInput, "itemMinimumWinPercent", 0, 500)
-end
-
-do
-    local OwnPotionsToggle = button(TestCanvas, "", UDim2.new(1,-24,0,36), UDim2.fromOffset(10,1564))
-    local function renderOwnPotions()
-        OwnPotionsToggle.Text = "OUR OFFER: RIDE / FLY FIRST + ADDS: " .. (Settings.ownPotionsOnly and "ON" or "OFF")
-        OwnPotionsToggle.BackgroundColor3 = Settings.ownPotionsOnly and Color3.fromRGB(40,105,70) or C.PANEL2
-    end
-    Runtime.registerSettingsUI(renderOwnPotions)
-    Runtime.connect(OwnPotionsToggle.Activated, function()
-        Settings.ownPotionsOnly = not Settings.ownPotionsOnly
-        saveSettings()
-        renderOwnPotions()
-        -- policySignature invalidates in-flight selection and acceptance.
-        -- Approved fillers only complete a potion base within the demand cap.
-    end)
-    renderOwnPotions()
 end
 
 local function setTestStatus(
@@ -9253,8 +9138,6 @@ local PlayerCooldowns =
 local function resetState()
     State.requestSendingAt, State.requestUncertainUntil = nil, nil
     State.chatAskAttempts, State.askSent = nil, nil
-    State.noStockStarted = nil
-    Runtime.potionAddonPlan = nil
     State.firstAcceptObserved, State.firstAcceptSentAt, State.emptyTheirSince = nil, nil, nil
     InventoryFlow.stop("trade state reset")
     State.unacceptRequired, State.declineRequested, State.policySignature = nil, nil, nil
@@ -9657,10 +9540,6 @@ function Runtime.pruneDisallowed(trade)
     local context = Runtime.captureTrade(trade)
     local live, _, mine = Runtime.liveContext(context, true, true)
     if not live or Runtime.tradeInConfirmation(live) then return false end
-    if Settings.ownPotionsOnly and Runtime.potionAddonPlan and not Runtime.potionBasePresent(mine) then
-        Runtime.potionAddonPlan = nil
-        State.optimizedSignature, State.optimizedOurSignature = nil, nil
-    end
     local remove, keep = {}, {}
     for _, item in pairs(getOfferItems(mine)) do
         local data = effectiveItemValue(item)
@@ -9832,15 +9711,6 @@ local function evaluateTrade(
         end
     end
 
-    if Settings.autoTrade and Settings.ownPotionsOnly then
-        for _, row in ipairs(mine.items) do
-            if not Runtime.isTradePotion(row.data.name) and not Runtime.potionBasePresent(myOffer) then
-                result.blocked, result.reason = true, "POTION BASE MISSING"
-                return result
-            end
-        end
-    end
-
     if Settings.autoTrade and mine.protectedPets > 0 then
         result.blocked = true
         result.reason = "OUR 3 STAR PET PROTECTED"
@@ -9962,39 +9832,6 @@ end
 -- SECURE ACCEPT / CONFIRM
 --============================================================
 
-function Runtime.revalidatePotionPlan(trade, mine, theirs)
-    local old = Runtime.potionAddonPlan
-    if not old or not Settings.ownPotionsOnly or AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then return false end
-    local context = Runtime.captureTrade(trade)
-    if not context or context.key ~= old.context.key or context.generation ~= old.context.generation
-        or context.theirs ~= old.context.theirs then return false end
-    local safe = {}
-    for _, candidate in ipairs(valuedInventory(true)) do safe[candidate.uid] = candidate end
-    local present, baseCount = {}, 0
-    for _, item in pairs(getOfferItems(mine)) do
-        local uid = tostring(itemUID(item))
-        local expected = old.base[uid] or old.addons[uid]
-        local candidate = safe[uid]
-        if not expected or not candidate or expected ~= Runtime.potionItemKey(item)
-            or expected ~= Runtime.potionItemKey(candidate.item) or present[uid] then return false end
-        present[uid] = true
-    end
-    for uid in pairs(old.base) do if not present[uid] then return false end baseCount += 1 end
-    for uid in pairs(old.addons) do if not present[uid] then return false end end
-    if baseCount == 0 then return false end
-    -- Evaluate the unchanged composition against fresh prices and all current
-    -- rules; no server action occurs while the tentative plan is installed.
-    local nextPlan = {context=context, base=old.base, addons=old.addons}
-    Runtime.potionAddonPlan = nextPlan
-    local evaluation = evaluateTrade(mine, theirs)
-    if evaluation.blocked or not evaluation.valid or not Runtime.liveContext(context, true, true) then
-        Runtime.potionAddonPlan = nil
-        return false
-    end
-    return true
-end
-
-
 local function secureAccept(trade, myOffer, theirOffer, expectedContext)
     if not Runtime.storageReady() then unaccept(myOffer) return false end
     if expectedContext and not Runtime.liveContext(expectedContext, true, true) then return false end
@@ -10005,10 +9842,6 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
     if State.declineRequested then return false end
     if State.unacceptRequired then unaccept(mine) return false end
     Runtime.observeFirstAccept(live, mine)
-    if Runtime.tradeInConfirmation(live) and Settings.ownPotionsOnly and Runtime.potionAddonPlan
-        and not Runtime.liveContext(Runtime.potionAddonPlan.context, false, true) then
-        Runtime.revalidatePotionPlan(live, mine, theirs)
-    end
     local evaluation = evaluateTrade(mine, theirs)
     live, _, mine, theirs = Runtime.liveContext(context, true, true)
     if not live or not Settings.autoTrade or Runtime.cancellationPending(context.key) then return false end
@@ -10337,15 +10170,6 @@ end
 
 end
 
-
-function Runtime.waitForPotionStock(expectedContext)
-    State.noStockStarted = State.noStockStarted or os.clock()
-    State.optimizedSignature, State.optimizedOurSignature = nil, nil
-    State.askStarted, State.askSignature = nil, nil
-    local remaining = math.max(0, 30 - (os.clock() - State.noStockStarted))
-    setTestStatus(string.format("NO AVAILABLE RIDE / FLY POTIONS • %.0fs", remaining), C.YELLOW)
-    if remaining <= 0 then decline(expectedContext) end
-end
 
 local function manageAutoTrade(trade)
     if not Runtime.storageReady() then
@@ -10685,16 +10509,6 @@ local function manageAutoTrade(trade)
 
         return
     end
-
-    if Settings.ownPotionsOnly == true and myCount == 0 then
-        local available = Runtime.potionWaitingOffer()
-        if #available == 0 then
-            Runtime.waitForPotionStock(operationContext)
-            return
-        end
-    end
-
-    State.noStockStarted = nil
 
     -- If the client replicated our showcase between loops before we recorded
     -- the timestamp, start the first-item window now rather than from trade start.
@@ -11082,7 +10896,7 @@ local function manageAutoTrade(trade)
             ourValue,
             cap,
             optimizationError =
-            Runtime.optimizeOwnOffer(
+            optimizeOurOffer(
                 evaluation.theirs.effectiveTotal
             )
 
@@ -11090,24 +10904,13 @@ local function manageAutoTrade(trade)
             State.optimizedSignature = nil
             return
         end
-        -- Keep a safe potion visible while asking for a better incoming offer.
-        -- This is a display fallback only: evaluateTrade and secureAccept still
-        -- enforce the full demand cap before Accept and before Confirm.
-        if Settings.ownPotionsOnly == true and #desired == 0 then
-            desired, ourValue = Runtime.potionWaitingOffer()
-            if not Runtime.liveContext(operationContext, true, true) then return end
-            if #desired == 0 then
-                Runtime.waitForPotionStock(operationContext)
-                return
-            end
-        end
         if
             #desired > 0
             and ourValue > 0
         then
 
             testLog(
-                ourValue > cap + 0.000000001 and "WAITING POTION • ASK ADD" or "BALANCE TO DEMAND CAP",
+                "BALANCE TO DEMAND CAP",
                 "THEM=",
                 valueText(
                     evaluation.theirs.total
@@ -11495,10 +11298,10 @@ local function runAutoTrade()
 
     local preflightGeneration=AutoTradeGeneration
     if AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then setTestStatus("WAIT AMVGG",C.YELLOW) return end
-    local available=Settings.ownPotionsOnly and Runtime.potionWaitingOffer() or valuedInventory()
+    local available=valuedInventory()
     if not Settings.autoTrade or preflightGeneration~=AutoTradeGeneration or not Runtime.alive() or getTrade() then return end
     if #available==0 then
-        setTestStatus(Settings.ownPotionsOnly and "NO AVAILABLE RIDE / FLY POTIONS • NO REQUEST" or "NO SAFE ITEMS • NO REQUEST",C.YELLOW)
+        setTestStatus("NO SAFE ITEMS • NO REQUEST",C.YELLOW)
         return
     end
 
