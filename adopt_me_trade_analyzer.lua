@@ -41,7 +41,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.44"
+    "11.7.45"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -9983,30 +9983,31 @@ local function showcase(myOffer)
         if tried then tried.nextAt=math.max(tried.nextAt,os.clock()+2) end
         State.showcasePending=nil
     end
+    -- Always retry the highest eligible value; a cooldown is never permission
+    -- to showcase a cheaper item. Re-read inventory and values each attempt.
+    local candidates=valuedInventory()
+    if not Runtime.liveContext(context,true,true) then return false,"TRADE_CHANGED" end
+    local candidate=candidates[1]
+    if not candidate then return false,"EXHAUSTED" end
     State.showcaseAttempts=State.showcaseAttempts or {}
-    local waiting=false
-    for _,candidate in ipairs(valuedInventory()) do
-        if not Runtime.liveContext(context,true,true) then return false,"TRADE_CHANGED" end
-        local uid=tostring(candidate.uid)
-        local attempt=State.showcaseAttempts[uid] or {count=0,nextAt=0}
-        if attempt.count<3 then
-            if os.clock()<attempt.nextAt then waiting=true
-            else
-                attempt.count+=1 attempt.nextAt=os.clock()+2
-                State.showcaseAttempts[uid]=attempt
-                State.showcaseTried[uid]=true
-                local ok,result=addOurItem(candidate.uid)
-                if not Runtime.liveContext(context,false,true) then return false,"TRADE_CHANGED" end
-                local mine=getTradeSides(getTrade())
-                if currentUIDSet(mine)[uid] then return true,"OBSERVED" end
-                if ok and result~=false then State.showcasePending={key=context.key,uid=uid,untilAt=os.clock()+4}
-                elseif Runtime.uncertainResult(result) then State.showcasePending={key=context.key,uid=uid,untilAt=os.clock()+30} end
-                return false,ok and result~=false and "PENDING" or "FAILED"
-            end
-        end
-    end
-    return false,waiting and "PENDING" or "EXHAUSTED"
+    local uid=tostring(candidate.uid)
+    local attempt=State.showcaseAttempts[uid] or {count=0,nextAt=0}
+    if attempt.count>=3 then return false,"HIGHEST_UNAVAILABLE" end
+    if os.clock()<attempt.nextAt then return false,"PENDING" end
+    attempt.count+=1 attempt.nextAt=os.clock()+2
+    State.showcaseAttempts[uid]=attempt
+    State.showcaseTried[uid]=true
+    testLog("SHOWCASE HIGHEST",candidate.name,candidate.variant,"VALUE",valueText(candidate.value),"ATTEMPT",attempt.count)
+    local ok,result=addOurItem(candidate.uid)
+    if not Runtime.liveContext(context,false,true) then return false,"TRADE_CHANGED" end
+    local mine=getTradeSides(getTrade())
+    if currentUIDSet(mine)[uid] then return true,"OBSERVED" end
+    if ok and result~=false then State.showcasePending={key=context.key,uid=uid,untilAt=os.clock()+4}
+    elseif Runtime.uncertainResult(result) then State.showcasePending={key=context.key,uid=uid,untilAt=os.clock()+30} end
+    testLog("SHOWCASE HIGHEST NOT OBSERVED",candidate.name,"RESULT",tostring(result),"CHEAPER FALLBACK DISABLED")
+    return false,ok and result~=false and "PENDING" or "FAILED"
 end
+
 
 testLog(
     "SETTINGS AUTO TRADE READY",
@@ -10491,6 +10492,12 @@ local function manageAutoTrade(trade)
 
         local added, showcaseReason = showcase(myOffer)
         if not Runtime.liveContext(operationContext, false, false) then return end
+        if showcaseReason == "HIGHEST_UNAVAILABLE" then
+            setTestStatus("HIGHEST SHOWCASE ITEM UNAVAILABLE • STOP TRADE", C.RED)
+            testLog("SHOWCASE STOP", "HIGHEST ITEM FAILED AFTER THREE ATTEMPTS; NO CHEAPER FALLBACK")
+            decline(operationContext)
+            return
+        end
         if added or showcaseReason == "EXHAUSTED" then
             State.showcaseFinished=true State.showcaseStockSignature=Runtime.inventorySignature()
         end
