@@ -41,7 +41,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.45"
+    "11.7.46"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -1350,6 +1350,16 @@ local function getItemName(item)
 end
 
 
+-- Verified Adopt Me food identities. Their in-game display names include
+-- (Forever), while AMVGG uses these canonical names. Never strip arbitrary
+-- parenthetical qualifiers from other pets/items or guess a potion price.
+function Runtime.catalogNameAlias(item)
+    if type(item) ~= "table" or item.category ~= "food" then return nil end
+    if item.kind == "pet_riding_potion" then return "Ride-A-Pet Potion" end
+    if item.kind == "pet_flying_potion" then return "Fly-A-Pet Potion" end
+    return nil
+end
+
 local function getCategoryDisplay(item)
 
     local category =
@@ -2140,7 +2150,7 @@ local function findCategory(slug, itemName)
     if type(category) ~= "table" then return nil end
     local exact = normalize(itemName)
     local direct = category[exact]
-    if type(direct) == "table" and direct.__ambiguous then return nil end
+    if type(direct) == "table" and direct.__ambiguous then return nil, nil, "AMBIGUOUS" end
     if type(direct) == "table" and type(direct.name) == "string" and normalize(direct.name) == exact then
         return direct, exact
     end
@@ -2175,14 +2185,14 @@ local function findCategory(slug, itemName)
         Runtime.lookupIndexBuilds = (Runtime.lookupIndexBuilds or 0) + 1
     end
     local found = index.exact[exact]
-    if found == false then return nil end
+    if found == false then return nil, nil, "AMBIGUOUS" end
     if found then return found.entry, found.key end
     -- Missing names are constant-time lookups after one indexed catalog pass.
     for name in pairs(aliases(itemName)) do
         local candidate = index.aliases[name]
-        if candidate == false then return nil end
+        if candidate == false then return nil, nil, "AMBIGUOUS" end
         if candidate then
-            if found and found.entry ~= candidate.entry then return nil end
+            if found and found.entry ~= candidate.entry then return nil, nil, "AMBIGUOUS" end
             found = candidate
         end
     end
@@ -2313,11 +2323,13 @@ local function findAMVGG(item)
         return nil
     end
 
-    local entry =
-        findCategory(
-            slug,
-            itemName
-        )
+    local entry, _, lookupReason = findCategory(slug, itemName)
+    if not entry and lookupReason ~= "AMBIGUOUS" then
+        local canonical = Runtime.catalogNameAlias(item)
+        if canonical and canonical ~= itemName then
+            entry = findCategory(slug, canonical)
+        end
+    end
 
     if entry then
 
@@ -5052,7 +5064,7 @@ function Runtime.bypassOwnMinimum(item)
 end
 
 
-local function isAllowed(name)
+local function isAllowed(name, item)
 
     if HARD_BLOCKED_ITEMS[normalize(name)] then
         return false
@@ -5065,14 +5077,9 @@ local function isAllowed(name)
         return tostring(Settings.allowedItems or ""):match("^%s*$") ~= nil
     end
 
-    return
-
-        allowed[
-            normalize(
-                name
-            )
-        ]
-        == true
+    if allowed[normalize(name)] == true then return true end
+    local canonical = Runtime.catalogNameAlias(item)
+    return canonical ~= nil and allowed[normalize(canonical)] == true
 end
 
 
