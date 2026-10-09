@@ -41,7 +41,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.39"
+    "11.7.43"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -135,8 +135,11 @@ do
     local function launch(method, delay, fn, ...)
         local args = table.pack(...)
         local function run()
-            if Runtime.alive() then fn(table.unpack(args, 1, args.n)) end
+            local ok, err = pcall(function()
+                if Runtime.alive() then fn(table.unpack(args, 1, args.n)) end
+            end)
             Runtime.jobs[coroutine.running()] = nil
+            if not ok then error(err, 0) end
         end
         local thread
         if delay ~= nil then thread = nativeTask.delay(delay, run)
@@ -687,6 +690,72 @@ function Runtime.priceFieldsValid(entry)
     return any
 end
 
+Runtime.catalogFields = {
+    "category", "value", "regularValue", "neonValue", "megaValue", "npRegularValue", "npNeonValue", "npMegaValue",
+    "fValue", "rValue", "frValue", "nfValue", "nrValue", "mfValue", "mrValue",
+    "demand", "regularDemand", "neonDemand", "megaDemand", "npRegularDemand", "npNeonDemand", "npMegaDemand",
+    "fDemand", "rDemand", "frDemand", "nfDemand", "nrDemand", "mfDemand", "mrDemand",
+    "rarity", "pet_rarity", "petRarity", "rarity_name", "rarityName",
+}
+function Runtime.normalizeCatalogDemand(raw)
+    if type(raw)=="number" then
+        if raw==1 or raw==2 or raw==3 then return raw end
+    elseif type(raw)=="string" then
+        local label=raw:match("^%s*(.-)%s*$"):lower()
+        if label=="1" or label=="2" or label=="3" then return tonumber(label) end
+        return ({low=1,medium=2,decent=2,high=3})[label]
+    end
+    return nil
+end
+function Runtime.catalogRarity(raw)
+    if type(raw)=="table" then raw=raw.name or raw.Name or raw.value or raw.Value end
+    if type(raw)~="string" then return nil end
+    local key=raw:lower():gsub("’", "'"):gsub("&", "and"):gsub("[^%w]","")
+    if ({common=true,uncommon=true,rare=true,ultrarare=true,legendary=true})[key] then return key end
+    return nil
+end
+function Runtime.catalogFieldValue(field,value)
+    if value==nil then return "missing" end
+    if field=="category" or field:lower():find("value",1,true) then
+        local parsed=num(value)
+        return parsed and string.format("%.17g",parsed) or "invalid:" .. tostring(value)
+    end
+    if field:lower():find("demand",1,true) then
+        local stars=Runtime.normalizeCatalogDemand(value)
+        if stars then return "stars:" .. stars end
+    elseif field:lower():find("rarity",1,true) then
+        local rarity=Runtime.catalogRarity(value)
+        if rarity then return "rarity:" .. rarity end
+    end
+    return type(value) .. ":" .. tostring(value):lower()
+end
+function Runtime.catalogFieldsConflict(a,b)
+    local rarityA,rarityB
+    for _,field in ipairs(Runtime.catalogFields) do
+        if a[field]~=nil and b[field]~=nil
+            and Runtime.catalogFieldValue(field,a[field])~=Runtime.catalogFieldValue(field,b[field]) then return true end
+        if field:lower():find("rarity",1,true) then
+            local ar,br=Runtime.catalogRarity(a[field]),Runtime.catalogRarity(b[field])
+            if ar then
+                if rarityA and rarityA~=ar then return true end
+                rarityA=ar
+            end
+            if br then
+                if rarityB and rarityB~=br then return true end
+                rarityB=br
+            end
+        end
+    end
+    return rarityA~=nil and rarityB~=nil and rarityA~=rarityB
+end
+function Runtime.catalogEntryFingerprint(entry)
+    local values={string.format("%q",tostring(entry.name))}
+    for _,field in ipairs(Runtime.catalogFields) do
+        values[#values+1]=string.format("%q",Runtime.catalogFieldValue(field,entry[field]))
+    end
+    return table.concat(values,":")
+end
+
 local function round(value, decimals)
     value = num(value)
     if value == nil then return nil end
@@ -833,11 +902,7 @@ local function aliases(text)
         end
     end
 
-    local original =
-        tostring(
-            text
-            or ""
-        )
+    local original = tostring(text or ""):lower()
 
     add(
         original
@@ -847,15 +912,15 @@ local function aliases(text)
 
     add(
         original:gsub(
-            "Chocobunny",
-            "Choccybunny"
+            "chocobunny",
+            "choccybunny"
         )
     )
 
     add(
         original:gsub(
-            "Choccybunny",
-            "Chocobunny"
+            "choccybunny",
+            "chocobunny"
         )
     )
 
@@ -1059,6 +1124,28 @@ local ClientData
 local ItemDB
 local RouterClient
 
+function Runtime.bootCall(fn, seconds)
+    local operation = {done=false}
+    local thread = Runtime.task.spawn(function()
+        local result = table.pack(pcall(fn))
+        if not operation.abandoned then operation.result, operation.done = result, true end
+    end)
+    local deadline = os.clock() + seconds
+    while Runtime.alive() and not operation.done and os.clock() < deadline do Runtime.task.wait(.05) end
+    if not Runtime.alive() or not operation.done then
+        operation.abandoned = true
+        if type(thread) == "thread" then pcall(Runtime.task.cancel, thread) Runtime.jobs[thread] = nil end
+        return false, Runtime.alive() and "MODULE LOAD TIMEOUT" or "MODULE LOAD CANCELLED"
+    end
+    return table.unpack(operation.result, 1, operation.result.n)
+end
+
+function Runtime.loadBootModule(label, fn, seconds)
+    local ok, value = Runtime.bootCall(fn, seconds or 15)
+    if not ok then error(label .. ": " .. tostring(value)) end
+    return value
+end
+
 
 do
 
@@ -1067,13 +1154,9 @@ do
         xpcall(
             function()
 
-                Fsys =
-                    require(
-                        RS:
-                        WaitForChild(
-                            "Fsys", 15
-                        )
-                    )
+                local module = RS:WaitForChild("Fsys", 15)
+                assert(module, "Fsys module unavailable")
+                Fsys = Runtime.loadBootModule("Fsys require", function() return require(module) end, 15)
 
                 if not Runtime.alive() then return end
 
@@ -1089,27 +1172,18 @@ do
                     "Fsys.load missing"
                 )
 
-                ClientData =
-                    Fsys.load(
-                        "ClientData"
-                    )
+                ClientData = Runtime.loadBootModule("ClientData", function() return Fsys.load("ClientData") end, 15)
 
                 if not Runtime.alive() then return end
 
-                ItemDB =
-                    Fsys.load(
-                        "ItemDB"
-                    )
+                ItemDB = Runtime.loadBootModule("ItemDB", function() return Fsys.load("ItemDB") end, 15)
 
                 if not Runtime.alive() then return end
 
                 pcall(
                     function()
 
-                        RouterClient =
-                            Fsys.load(
-                                "RouterClient"
-                            )
+                        RouterClient = Runtime.loadBootModule("RouterClient", function() return Fsys.load("RouterClient") end, 10)
                     end
                 )
 
@@ -1487,74 +1561,22 @@ do
     end
 
     local function rarityText(value)
-        if type(value) == "string" then
-            return value:lower()
-        end
-
-        if type(value) == "table" then
-            local nested =
-                value.name
-                or value.Name
-                or value.value
-                or value.Value
-
-            if type(nested) == "string" then
-                return nested:lower()
-            end
-        end
-
-        return nil
+        return Runtime.catalogRarity(value)
     end
 
     function CommonPetFilter.isCommon(item)
-        if
-            type(item) ~= "table"
-            or tostring(item.category or "") ~= "pets"
-        then
-            return false
-        end
-
-        local p =
-            type(item.properties) == "table"
-            and item.properties
-            or {}
-
-        local candidates = {
-            item.rarity,
-            item.pet_rarity,
-            item.petRarity,
-            item.rarity_name,
-            item.rarityName,
-            p.rarity,
-            p.pet_rarity,
-            p.petRarity,
-            p.rarity_name,
-            p.rarityName,
-        }
-
-        for index = 1, 10 do
-            local value = candidates[index]
-            local rarity = rarityText(value)
-
-            if rarity == "common" then
-                return true
-            end
-
-            if
-                rarity
-                and rarity ~= ""
-                and rarity ~= "unknown"
-            then
-                return false
+        if type(item) ~= "table" or tostring(item.category or "") ~= "pets" then return false end
+        local db = getItemDB(item)
+        local p = type(item.properties) == "table" and item.properties or {}
+        local sources = {item, p, type(db) == "table" and db or {}}
+        for _, source in ipairs(sources) do
+            local fields = {"rarity", "pet_rarity", "petRarity", "rarity_name", "rarityName"}
+            for _, field in ipairs(fields) do
+                local rarity = rarityText(source[field])
+                if rarity then return rarity == "common" end
             end
         end
-
-        local name =
-            normalize(
-                getItemName(item)
-            )
-
-        return commonNames[name] == true
+        return commonNames[normalize(getItemName(item))] == true
     end
 
     function CommonPetFilter.isCustomUnwanted(item)
@@ -1935,7 +1957,8 @@ local function parseBody(body)
                 if not previous then
                     database[key], count = shallowCopy(object), count + 1
                 elseif not previous.__ambiguous then
-                    if previous.id ~= nil and object.id ~= nil and tostring(previous.id) ~= tostring(object.id) then
+                    if (previous.id ~= nil and object.id ~= nil and tostring(previous.id) ~= tostring(object.id))
+                        or Runtime.catalogFieldsConflict(previous, object) then
                         database[key] = {name = object.name, __ambiguous = true}
                     else
                         merge(previous, object)
@@ -2020,10 +2043,11 @@ local function loadCategory(slug)
         if status == 429 then return {}, 0, status end
         if status >= 200 and status < 400 and type(body) == "string" then
             local database, count = parseBody(body)
-            local fingerprint = Runtime.catalogFingerprint(slug, database, count)
+            local fingerprint, valuationFingerprint = Runtime.catalogFingerprint(slug, database, count)
             if fingerprint then
-                evidence[fingerprint] = (evidence[fingerprint] or 0) + 1
-                Runtime.catalogVerified[database] = {slug=slug, fingerprint=fingerprint, sources=evidence[fingerprint]}
+                local key = fingerprint .. "\nVALUES=" .. valuationFingerprint
+                evidence[key] = (evidence[key] or 0) + 1
+                Runtime.catalogVerified[database] = {slug=slug, fingerprint=fingerprint, valuationFingerprint=valuationFingerprint, sources=evidence[key]}
                 -- Unchanged full coverage needs one response. A changed catalog
                 -- still needs matching independent response formats.
                 if Runtime.catalogComplete(slug, database, count) then return database, count, status end
@@ -2039,7 +2063,8 @@ local function refresh()
     if not Runtime.alive() then return false end
     if AMVGG.loading then
         local started = Runtime.priceRefreshStarted
-        if not started or os.clock() - started < 125 then return false end
+        if not started then Runtime.priceRefreshStarted = os.clock() return false end
+        if os.clock() - started < 125 then return false end
         Runtime.priceRefreshGeneration = (Runtime.priceRefreshGeneration or 0) + 1
         AMVGG.loading, AMVGG.dataStale = false, true
     end
@@ -2094,12 +2119,14 @@ local function refresh()
     if not ok or not snapshot then
         AMVGG.error = tostring(ok and failure or snapshot)
         AMVGG.dataStale = true
+        Runtime.priceRetryAt = os.clock() + 30
         return false
     end
     AMVGG.categories, AMVGG.counts, AMVGG.total = snapshot.categories, snapshot.counts, snapshot.total
     AMVGG.ready, AMVGG.dataStale, AMVGG.error = true, false, nil
     AMVGG.version += 1
     AMVGG.lastRefresh = os.time()
+    Runtime.lastRefreshClock, Runtime.priceRetryAt = os.clock(), nil
     return true
 end
 
@@ -2171,7 +2198,7 @@ Runtime.catalogMinimum = {pets=786, eggs=44, petwear=237, strollers=35, food=51,
 Runtime.catalogVerified = setmetatable({}, {__mode="k"})
 function Runtime.catalogFingerprint(slug, database, count)
     if type(database) ~= "table" or not num(count) or count % 1 ~= 0 then return nil end
-    local identities, seen, actual = {}, {}, 0
+    local identities, valuations, seen, actual = {}, {}, {}, 0
     for key, entry in pairs(database) do
         if type(entry) ~= "table" or type(entry.name) ~= "string" or entry.__ambiguous
             or not Runtime.priceFieldsValid(entry)
@@ -2180,17 +2207,19 @@ function Runtime.catalogFingerprint(slug, database, count)
         if seen[identity] then return nil end
         seen[identity], actual = true, actual + 1
         identities[#identities + 1] = identity
+        valuations[#valuations + 1] = string.format("%q:%s", identity, Runtime.catalogEntryFingerprint(entry))
     end
     -- A small catalog edit is allowed only with corroboration below. Large
     -- drops still require an updated verified baseline, never blind acceptance.
     local floor = math.max(1, math.floor((Runtime.catalogMinimum[slug] or 1) * .9), math.floor(((AMVGG.counts or {})[slug] or 0) * .9))
     if actual ~= count or count < floor then return nil end
     table.sort(identities)
-    return table.concat(identities, "|")
+    table.sort(valuations)
+    return table.concat(identities, "|"), table.concat(valuations, "|")
 end
 
 function Runtime.catalogComplete(slug, database, count)
-    local fingerprint = Runtime.catalogFingerprint(slug, database, count)
+    local fingerprint, valuationFingerprint = Runtime.catalogFingerprint(slug, database, count)
     if not fingerprint then return false end
     local byID = {}
     for _, entry in pairs(database) do if entry.id ~= nil then byID[tostring(entry.id)] = true end end
@@ -2205,7 +2234,7 @@ function Runtime.catalogComplete(slug, database, count)
     end
     if not changed then return true end -- renaming with the same ID is safe
     local verified = Runtime.catalogVerified[database]
-    return verified ~= nil and verified.slug == slug and verified.fingerprint == fingerprint and verified.sources >= 2
+    return verified ~= nil and verified.slug == slug and verified.fingerprint == fingerprint and verified.valuationFingerprint == valuationFingerprint and verified.sources >= 2
 end
 
 
@@ -2743,16 +2772,7 @@ do
     end
 
     function DemandPolicy.normalize(raw)
-        if type(raw) == "number" then
-            if raw == 1 or raw == 2 or raw == 3 then return raw end
-        elseif type(raw) == "string" then
-            local label = raw:match("^%s*(.-)%s*$"):lower()
-            if label == "1" or label == "2" or label == "3" then
-                return tonumber(label)
-            end
-            return LABEL_STARS[label]
-        end
-        return nil
+        return Runtime.normalizeCatalogDemand(raw)
     end
 
     function DemandPolicy.read(entry, source, variant)
@@ -2936,10 +2956,10 @@ function Runtime.numberValue(key,value,fallbackMin,fallbackMax)
 end
 
 local SETTINGS_FILE =
-    "am_trade_v1170.json"
+    "am_trade_v1170_" .. tostring(LocalPlayer.UserId) .. ".json"
 
 local FIRST_SEEN_FILE =
-    "am_first_seen_v1170.json"
+    "am_first_seen_v1170_" .. tostring(LocalPlayer.UserId) .. ".json"
 
 
 local Settings = {
@@ -3085,118 +3105,221 @@ local Settings = {
 
 
 local function loadJSON(path)
-
-    if
-        type(readfile)
-            ~= "function"
-        or type(isfile)
-            ~= "function"
-    then
-
-        return nil
-    end
-
-    local ok,
-        exists =
-        pcall(
-            isfile,
-            path
-        )
-
-    if
-        not ok
-        or not exists
-    then
-
-        return nil
-    end
-
-    local ok2,
-        result =
-        pcall(
-            function()
-
-                return
-                    HttpService:
-                    JSONDecode(
-                        readfile(
-                            path
-                        )
-                    )
-            end
-        )
-
-    if
-        ok2
-        and type(result)
-            == "table"
-    then
-
-        return result
-    end
-
-    return nil
+    return Runtime.readSavedJSON(path)
 end
 
-
-local function saveJSON(
-    path,
-    data
-)
-
-    if type(writefile) ~= "function" then
-        return
-    end
-
-    pcall(
-        function()
-
-            writefile(
-                path,
-
-                HttpService:
-                JSONEncode(
-                    data
-                )
-            )
+Runtime.fileSchemas = Runtime.fileSchemas or {}
+Runtime.fileReadBlocked = Runtime.fileReadBlocked or {}
+Runtime.fileLastGood = Runtime.fileLastGood or {}
+Runtime.storageErrorKinds = Runtime.storageErrorKinds or {}
+Runtime.legacyFiles = {[SETTINGS_FILE]="am_trade_v1170.json", [FIRST_SEEN_FILE]="am_first_seen_v1170.json"}
+Runtime.settingsDefaults = shallowCopy(Settings)
+Runtime.settingsLocalOverrides = {}
+Runtime.settingsObserved = shallowCopy(Settings)
+Runtime.settingsUI = {}
+Runtime.fileSchemas[SETTINGS_FILE] = function(data)
+    local known = 0
+    for key, value in pairs(data) do
+        local default = Runtime.settingsDefaults[key]
+        if default ~= nil then
+            known += 1
+            if type(default) == "number" then
+                if num(value) == nil then return false end
+            elseif type(default) == "boolean" then
+                if type(value) ~= "boolean" and value ~= "true" and value ~= "false" then return false end
+            elseif type(value) ~= type(default) then return false end
         end
-    )
+    end
+    return known > 0
 end
 
+function Runtime.storageIssue(path, message, kind)
+    Runtime.storageErrors = Runtime.storageErrors or {}
+    Runtime.storageErrorKinds = Runtime.storageErrorKinds or {}
+    local errors = Runtime.storageErrorKinds[path] or {}
+    Runtime.storageErrorKinds[path] = errors
+    errors[kind or "general"] = message
+    local messages = {}
+    for _, key in ipairs({"read", "write", "general"}) do
+        if errors[key] then messages[#messages+1] = errors[key] end
+    end
+    local combined = #messages > 0 and table.concat(messages, " | ") or nil
+    if combined and Runtime.storageErrors[path] ~= combined then
+        warn("[AM STORAGE] " .. tostring(path) .. ": " .. combined)
+    end
+    Runtime.storageErrors[path] = combined
+end
+
+function Runtime.savedJSONValid(path, data)
+    if type(data) ~= "table" then return false end
+    local validator = Runtime.fileSchemas[path]
+    return not validator or validator(data) == true
+end
+
+function Runtime.readSavedJSON(path)
+    local function read(candidate)
+        if type(isfile) ~= "function" or type(readfile) ~= "function" then error("FILE API UNAVAILABLE") end
+        if not isfile(candidate) then return nil, "MISSING" end
+        local text = readfile(candidate)
+        local data = HttpService:JSONDecode(text)
+        if not Runtime.savedJSONValid(path, data) then error("INVALID SAVED JSON SCHEMA") end
+        return data, "READ", text
+    end
+    local ok, data, status, text = pcall(read, path)
+    if ok and status == "READ" then
+        Runtime.fileLastGood[path], Runtime.fileReadBlocked[path] = text, nil
+        Runtime.storageIssue(path, nil, "read")
+        return data, "READ"
+    end
+    local backupOK, backup, backupStatus, backupText = pcall(read, path .. ".bak")
+    if backupOK and backupStatus == "READ" then
+        Runtime.fileLastGood[path], Runtime.fileReadBlocked[path] = backupText, nil
+        Runtime.storageIssue(path, "RECOVERED VERIFIED BACKUP; MAIN FILE NEEDS REPAIR", "read")
+        return backup, "READ", "BACKUP"
+    end
+    -- Recover the first verified history even if committing main failed.
+    -- A stage is never preferred to an existing trusted committed history.
+    if path == FIRST_SEEN_FILE then
+        local stageOK, stage, stageStatus, stageText = pcall(read, path .. ".tmp")
+        if stageOK and stageStatus == "READ" and stage.initialized == true then
+            Runtime.fileLastGood[path], Runtime.fileReadBlocked[path] = stageText, nil
+            Runtime.storageIssue(path, "RECOVERED HISTORY STAGING; MAIN FILE NEEDS REPAIR", "read")
+            return stage, "READ", "STAGING"
+        end
+        if not stageOK or stageStatus ~= "MISSING" then ok, data, status = false, stage, "ERROR" end
+    end
+    if ok and status == "MISSING" and backupOK and backupStatus == "MISSING" then
+        local legacy = Runtime.legacyFiles[path]
+        if legacy and legacy ~= path then
+            local legacyOK,legacyData,legacyStatus,legacyText=pcall(read,legacy)
+            local backupOK,backupData,backupStatus,backupText=pcall(read,legacy .. ".bak")
+            if legacyOK and legacyStatus=="READ" or backupOK and backupStatus=="READ" then
+                if not legacyOK or legacyStatus~="READ" then legacyData,legacyText=backupData,backupText end
+                Runtime.fileLastGood[path],Runtime.fileReadBlocked[path]=legacyText,nil
+                Runtime.storageIssue(path,nil,"read")
+                return legacyData,"READ","LEGACY"
+            end
+            if not legacyOK or not backupOK then
+                ok,data,status=false,not legacyOK and legacyData or backupData,"ERROR"
+            end
+        end
+        if ok and not Runtime.fileReadBlocked[path] then
+            Runtime.fileLastGood[path] = nil
+            Runtime.storageIssue(path, nil, "read")
+            return nil, "MISSING"
+        end
+    end
+    local message = "READ FAILED: " .. tostring(not ok and data or not backupOK and backup or "TRUSTED FILE UNAVAILABLE"):sub(1,140)
+    Runtime.fileReadBlocked[path] = true
+    Runtime.storageIssue(path, message, "read")
+    return nil, "ERROR", message
+end
+
+function Runtime.registerSettingsUI(refresh)
+    Runtime.settingsUI[#Runtime.settingsUI+1] = refresh
+end
+function Runtime.refreshSettingsUI()
+    for _, refresh in ipairs(Runtime.settingsUI or {}) do
+        local ok, err = pcall(refresh)
+        if not ok then warn("[AM SETTINGS UI] " .. tostring(err)) end
+    end
+end
+function Runtime.captureSettingsEdits()
+    for key, value in pairs(Settings) do
+        if value ~= Runtime.settingsObserved[key] then Runtime.settingsLocalOverrides[key] = value end
+    end
+end
+function Runtime.settingsBaseline()
+    Runtime.settingsObserved = shallowCopy(Settings)
+end
+
+function Runtime.storageNotice()
+    local errors = {}
+    for path, message in pairs(Runtime.storageErrors or {}) do
+        errors[#errors + 1] = tostring(path) .. ": " .. tostring(message)
+    end
+    table.sort(errors)
+    return #errors > 0 and ("STORAGE ERROR • " .. table.concat(errors, " | ")) or nil
+end
+
+local function saveJSON(path, data)
+    -- Serialize writers in this executor, including replacement Runtime objects.
+    ENV.__AM_ANALYZER_FILE_WRITERS = ENV.__AM_ANALYZER_FILE_WRITERS or {}
+    local writers = ENV.__AM_ANALYZER_FILE_WRITERS
+    if writers[path] then return false, "STORAGE WRITE BUSY" end
+    local owner = {}
+    writers[path] = owner
+    local function save()
+        local _, status = loadJSON(path)
+        if status == "ERROR" then return false, Runtime.storageErrors[path] end
+        if not Runtime.savedJSONValid(path, data) then return false, "INVALID SAVE SCHEMA" end
+        local previous = Runtime.fileLastGood[path]
+        local initialMain = isfile(path) and readfile(path) or nil
+        if type(writefile) ~= "function" then error("WRITEFILE UNAVAILABLE") end
+        local encoded = HttpService:JSONEncode(data)
+        if type(encoded) ~= "string" then error("JSON ENCODING FAILED") end
+        local function verify(candidate, wanted)
+            local actual = readfile(candidate)
+            if actual ~= wanted or not Runtime.savedJSONValid(path,HttpService:JSONDecode(actual)) then
+                error("WRITE VERIFICATION FAILED")
+            end
+        end
+        local function mainUnchanged()
+            return (isfile(path) and readfile(path) or nil) == initialMain
+        end
+        writefile(path .. ".tmp", encoded)
+        verify(path .. ".tmp", encoded)
+        if not mainUnchanged() then return false, "STORAGE WRITE CONFLICT" end
+        if previous ~= nil then
+            local backupOK, backup = pcall(readfile,path .. ".bak")
+            if not backupOK or backup ~= previous then writefile(path .. ".bak",previous) end
+            verify(path .. ".bak",previous)
+        end
+        if not mainUnchanged() then return false, "STORAGE WRITE CONFLICT" end
+        writefile(path,encoded)
+        verify(path,encoded)
+        Runtime.fileLastGood[path] = encoded
+        return true
+    end
+    local called, ok, err = pcall(save)
+    if writers[path] == owner then writers[path] = nil end
+    if not called then err,ok=ok,false end
+    -- Never roll main back: a different process may have committed after us.
+    -- Preserve the checked backup/staging for recovery from partial writes.
+    local message = not ok and tostring(err or "SAVE FAILED"):sub(1,180) or nil
+    Runtime.storageIssue(path,message,"write")
+    if ok then Runtime.storageIssue(path,nil,"read") end
+    return ok,message
+end
+
+function Runtime.applySavedSettings(saved, preserveLocal)
+    if type(saved) ~= "table" then return end
+    for key,value in pairs(saved) do
+        local default = Runtime.settingsDefaults[key]
+        if not preserveLocal or Runtime.settingsLocalOverrides[key] == nil then
+            if type(default) == "number" then
+                local parsed = num(value)
+                if parsed then Settings[key]=Runtime.numberValue(key,parsed) end
+            elseif type(default) == "boolean" then
+                if type(value)=="boolean" then Settings[key]=value
+                elseif value=="true" then Settings[key]=true
+                elseif value=="false" then Settings[key]=false end
+            elseif type(default)=="string" and type(value)=="string" then Settings[key]=value end
+        end
+    end
+end
 
 do
 
-    local saved =
-        loadJSON(
-            SETTINGS_FILE
-        )
-
-    if type(saved) == "table" then
-
-        for key,
-            value in pairs(
-                saved
-            )
-        do
-
-            local default = Settings[key]
-            if type(default) == "number" then
-                local parsed = num(value)
-                if parsed then
-                    parsed = Runtime.numberValue(key, parsed)
-                    Settings[key] = parsed
-                end
-            elseif type(default) == "boolean" then
-                if type(value) == "boolean" then Settings[key] = value
-                elseif value == "true" then Settings[key] = true
-                elseif value == "false" then Settings[key] = false end
-            elseif type(default) == "string" and type(value) == "string" then
-                Settings[key] = value
-            end
-        end
-    end
+    local saved = nil
+    local status,origin
+    saved, status, origin = loadJSON(SETTINGS_FILE)
+    Runtime.settingsNeedMigration = origin == "LEGACY"
+    Runtime.settingsReadFailed = status == "ERROR"
+    Runtime.applySavedSettings(saved)
 end
 
+function Runtime.normalizeSettings()
 -- Saved settings from older versions may not have the new fields, and an
 -- old/corrupt settings file could theoretically leave both automation modes
 -- enabled. Normalize everything once at boot.
@@ -3300,6 +3423,10 @@ else
 end
 
 
+end
+Runtime.normalizeSettings()
+Runtime.settingsBaseline()
+
 local AutoTradeGeneration = 0
 local Gui
 
@@ -3345,11 +3472,12 @@ end
 
 local function saveSettings()
 
-    saveJSON(
-        SETTINGS_FILE,
-        Settings
-    )
+    Runtime.captureSettingsEdits()
+    local ok, err = saveJSON(SETTINGS_FILE, Settings)
+    if ok then Runtime.settingsBaseline() end
+    return ok, err
 end
+if Runtime.settingsNeedMigration and not Runtime.settingsReadFailed then saveSettings() end
 
 
 --============================================================
@@ -3368,11 +3496,14 @@ function Runtime.policySignature()
 end
 
 function Runtime.disableAutomation()
+    Runtime.settingsLocalOverrides.autoTrade = false
     Runtime.potionAddonPlan = nil
     AutoTradeGeneration += 1
     if Runtime.flow then Runtime.flow.stop("Auto Trade disabled") end
     local state = Runtime.state
     if state then
+        state.requestSendingAt, state.requestUncertainUntil, state.target, state.requestStarted = nil, nil, nil, nil
+        state.chatAskAttempts, state.askSent = nil, nil
         state.optimizedSignature, state.acceptReadySignature, state.acceptReadySince = nil, nil, nil
         state.policySignature, state.optimizedOurSignature, state.confirmPending = nil, nil, nil
     end
@@ -3380,31 +3511,66 @@ function Runtime.disableAutomation()
 end
 
 
-local FirstSeen =
-    loadJSON(
-        FIRST_SEEN_FILE
-    )
-
-
-if type(FirstSeen) ~= "table" then
-
-    FirstSeen = {
-
-        initialized =
-            false,
-
-        items =
-            {},
-    }
+Runtime.fileSchemas[FIRST_SEEN_FILE] = function(data)
+    return type(data.items) == "table" and type(data.initialized) == "boolean"
 end
-
+local FirstSeen = nil
+do
+    local status
+    local origin
+    FirstSeen, status, origin = loadJSON(FIRST_SEEN_FILE)
+    Runtime.firstSeenDirty = origin ~= nil
+    Runtime.firstSeenReadFailed = status == "ERROR"
+    Runtime.firstSeenDurable = status == "READ"
+end
+if type(FirstSeen) ~= "table" then
+    FirstSeen = {initialized = Runtime.firstSeenReadFailed, items = {}}
+end
 
 if type(FirstSeen.items) ~= "table" then
-
-    FirstSeen.items =
-        {}
+    FirstSeen.items, FirstSeen.initialized = {}, true
+    Runtime.firstSeenReadFailed = true
+    Runtime.fileReadBlocked[FIRST_SEEN_FILE] = true
+    Runtime.storageIssue(FIRST_SEEN_FILE, "INVALID HISTORY SCHEMA")
 end
 
+function Runtime.configurationReady()
+    if not Runtime.settingsReadFailed and not Runtime.fileReadBlocked[SETTINGS_FILE] then return true end
+    if os.clock() < (Runtime.settingsRecoveryAt or 0) then return false end
+    Runtime.settingsRecoveryAt = os.clock()+3
+    Runtime.captureSettingsEdits()
+    -- Recovery never silently starts automation from a temporary OFF state.
+    if Settings.autoTrade == false then Runtime.settingsLocalOverrides.autoTrade = false end
+    local saved,status=loadJSON(SETTINGS_FILE)
+    if status ~= "READ" then Runtime.settingsReadFailed=true return false end
+    Runtime.applySavedSettings(saved,true)
+    Runtime.normalizeSettings()
+    Runtime.applySavedSettings(Runtime.settingsLocalOverrides,false)
+    Runtime.settingsReadFailed=false
+    Runtime.settingsBaseline()
+    AutoTradeGeneration += 1
+    Runtime.newPolicyEpoch=(Runtime.newPolicyEpoch or 0)+1
+    Runtime.nextNewExpiry,Runtime.inventorySignatureAt=nil,nil
+    if Runtime.state then Runtime.state.optimizedSignature=nil end
+    Runtime.refreshSettingsUI()
+    return true
+end
+
+function Runtime.storageReady(forHistoryUpdate)
+    if not Runtime.configurationReady() then return false end
+    if Runtime.firstSeenReadFailed or Runtime.fileReadBlocked[FIRST_SEEN_FILE] then
+        if os.clock() < (Runtime.savedRecoveryAt or 0) then return false end
+        Runtime.savedRecoveryAt=os.clock()+3
+        local saved,status=loadJSON(FIRST_SEEN_FILE)
+        if status ~= "READ" then Runtime.firstSeenReadFailed=true return false end
+        FirstSeen=saved
+        Runtime.firstSeenReadFailed=false
+        Runtime.firstSeenDurable=true
+        Runtime.newPolicyEpoch=(Runtime.newPolicyEpoch or 0)+1
+        Runtime.nextNewExpiry=nil
+    end
+    return forHistoryUpdate == true or (num(Settings.newItemHours) or 24)<=0 or Runtime.firstSeenDurable ~= false
+end
 
 local function entryID(
     source,
@@ -3430,8 +3596,21 @@ local function entryID(
 end
 
 
+function Runtime.firstSeenTimestamp(value, now)
+    if type(value) ~= "number" or not num(value) or value < 0 or value > now + 60 then return nil end
+    return value > now and now or value
+end
+
+function Runtime.repairFirstSeen(id, value)
+    FirstSeen.items[id] = value
+    Runtime.firstSeenDirty = true
+    Runtime.newPolicyEpoch = (Runtime.newPolicyEpoch or 0) + 1
+    Runtime.nextNewExpiry = nil
+end
+
 local function updateFirstSeen()
 
+    if not Runtime.storageReady(true) then return end
     if not AMVGG.ready then
         return
     end
@@ -3443,8 +3622,14 @@ local function updateFirstSeen()
     local now =
         os.time()
 
-    local changed =
-        false
+    local changed = false
+    for id, value in pairs(FirstSeen.items) do
+        local valid = Runtime.firstSeenTimestamp(value, now)
+        if valid == nil or valid ~= value then
+            Runtime.repairFirstSeen(id, valid or now)
+            changed = true
+        end
+    end
 
     for source,
         database in pairs(
@@ -3501,12 +3686,12 @@ local function updateFirstSeen()
             true
     end
 
-    if changed then
-
-        saveJSON(
-            FIRST_SEEN_FILE,
-            FirstSeen
-        )
+    if changed then Runtime.firstSeenDirty = true end
+    if Runtime.firstSeenDirty then
+        local saved = saveJSON(FIRST_SEEN_FILE, FirstSeen)
+        Runtime.firstSeenDurable = saved
+        Runtime.firstSeenDirty = not saved
+        -- Keep the current session's NEW restrictions even when storage fails.
     end
 end
 
@@ -3523,10 +3708,18 @@ end
 local function isNewEntry(source, entry)
     Runtime.newPolicySignature()
     if type(entry) ~= "table" or not source then return false, 0 end
+    if (num(Settings.newItemHours) or 24) <= 0 then return false, 0 end
+    if Runtime.firstSeenReadFailed or Runtime.fileReadBlocked[FIRST_SEEN_FILE] then return true, 0 end
     local id = entryID(source, normalize(entry.name or ""), entry)
-    local seen = num(FirstSeen.items[id])
-    if not seen or seen <= 0 then return false, 0 end
     local now = os.time()
+    local stored = FirstSeen.items[id]
+    if stored == nil and FirstSeen.initialized ~= true then return false, 0 end
+    local seen = Runtime.firstSeenTimestamp(stored, now)
+    if seen == nil or seen ~= stored then
+        seen = stored == nil and FirstSeen.initialized ~= true and 0 or (seen or now)
+        Runtime.repairFirstSeen(id, seen)
+    end
+    if seen == 0 then return false, 0 end
     local age = now - seen
     local maxAge = (num(Settings.newItemHours) or 24) * 3600
     local active = age >= 0 and age < maxAge
@@ -3697,49 +3890,20 @@ function Runtime.tradeInConfirmation(trade)
 end
 
 local function getTrade()
-
-    local keys = {
-        "trade",
-        "trading",
-    }
-
-    for _,
-        key in ipairs(
-            keys
-        )
-    do
-
-        local ok,
-            trade =
-            pcall(
-                function()
-
-                    return
-                        ClientData.get(
-                            key
-                        )
-                end
-            )
-
-        if
-            ok
-            and type(trade)
-                == "table"
-            and (
-                trade.sender
-                or trade.recipient
-                or trade.sender_offer
-                or trade.recipient_offer
-            )
-        then
-
-            return trade
+    local failed=false
+    for _,key in ipairs({"trade","trading"}) do
+        local ok,trade=pcall(function() return ClientData.get(key) end)
+        if ok and type(trade)=="table" and (trade.sender or trade.recipient or trade.sender_offer or trade.recipient_offer) then
+            Runtime.lastTradeReadStatus,Runtime.lastTrustedTrade="FOUND",trade
+            return trade,"FOUND"
         end
+        if not ok or (trade ~= nil and trade ~= false) then failed=true end
     end
-
-    return nil
+    local status=failed and "ERROR" or "ABSENT"
+    Runtime.lastTradeReadStatus=status
+    if status=="ABSENT" then Runtime.lastTrustedTrade=nil end
+    return nil,status
 end
-
 
 local function getTradeSides(trade)
 
@@ -3854,6 +4018,28 @@ local function itemSignature(item)
         tostring(item.kind), tostring(item.category), tostring(getVariant(item)))
 end
 
+function Runtime.itemValuationSignature(item)
+    if type(item) ~= "table" then return "INVALID ITEM" end
+    local values = {itemSignature(item), string.format("%q", getItemName(item))}
+    local properties = type(item.properties) == "table" and item.properties or {}
+    local db = getItemDB(item)
+    for _, source in ipairs({item, properties, type(db) == "table" and db or {}}) do
+        for _, field in ipairs({"rarity", "pet_rarity", "petRarity", "rarity_name", "rarityName"}) do
+            local value = source[field]
+            if type(value) == "table" then value = value.name or value.Name or value.value or value.Value end
+            values[#values + 1] = string.format("%q:%q", type(value), tostring(value))
+        end
+    end
+    return table.concat(values, ":")
+end
+
+function Runtime.offerValuationSignature(offer)
+    local values = {}
+    for _, item in pairs(getOfferItems(offer)) do values[#values + 1] = Runtime.itemValuationSignature(item) end
+    table.sort(values)
+    return table.concat(values, "|")
+end
+
 local function offerSignature(offer)
 
     local list =
@@ -3942,6 +4128,7 @@ function Runtime.captureTrade(trade)
         key = Runtime.tradeKey(live, partner), generation = AutoTradeGeneration, auto = Settings.autoTrade,
         prices = AMVGG.version, policy = Runtime.policySignature(), newPolicy = Runtime.newPolicySignature(),
         mine = offerSignature(mine), theirs = offerSignature(theirs),
+        valuationMine = Runtime.offerValuationSignature(mine), valuationTheirs = Runtime.offerValuationSignature(theirs),
     }
 end
 
@@ -3955,6 +4142,8 @@ function Runtime.liveContext(context, checkMine, checkPrices)
     if offerSignature(theirs) ~= context.theirs then return nil, "THEIR_CHANGED" end
     if checkMine and offerSignature(mine) ~= context.mine then return nil, "OUR_CHANGED" end
     if checkPrices then
+        if context.valuationTheirs ~= Runtime.offerValuationSignature(theirs) then return nil, "THEIR_METADATA_CHANGED" end
+        if checkMine and context.valuationMine ~= Runtime.offerValuationSignature(mine) then return nil, "OUR_METADATA_CHANGED" end
         if AMVGG.dataStale or AMVGG.loading or not AMVGG.ready then return nil, "PRICES_UNAVAILABLE" end
         if AMVGG.version ~= context.prices then return nil, "PRICES_CHANGED" end
         if Runtime.newPolicySignature() ~= context.newPolicy then return nil, "NEW_POLICY_CHANGED" end
@@ -3964,7 +4153,7 @@ function Runtime.liveContext(context, checkMine, checkPrices)
 end
 
 function Runtime.optimizationKey(theirOffer)
-    return offerSignature(theirOffer) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|POLICY=" .. Runtime.policySignature()
+    return Runtime.offerValuationSignature(theirOffer) .. "|AMVGG=" .. tostring(AMVGG.version) .. "|POLICY=" .. Runtime.policySignature()
         .. "|INVENTORY=" .. Runtime.inventorySignature() .. "|NEW=" .. tostring(Runtime.newPolicySignature())
 end
 
@@ -4168,9 +4357,11 @@ local function evaluateOffer(
                 row.bypassedOwnMinimum = true
             end
 
-            result.total =
-                result.total
-                + data.value
+            if num(data.value) == nil or data.value < 0 or num(result.total + data.value) == nil then
+                result.numericError = true
+                return
+            end
+            result.total += data.value
 
             if demandSide == "theirs" then
                 local credit, rule = DemandPolicy.credit(
@@ -4187,7 +4378,12 @@ local function evaluateOffer(
                 row.effectiveValue = data.value
                 row.effectiveRule = "RAW"
             end
-            result.effectiveTotal = result.effectiveTotal + row.effectiveValue
+            if num(row.effectiveValue) == nil or row.effectiveValue < 0
+                or num(result.effectiveTotal + row.effectiveValue) == nil then
+                result.numericError = true
+                return
+            end
+            result.effectiveTotal += row.effectiveValue
         end
 
         if data.known then
@@ -4259,16 +4455,9 @@ local function profitPercent(
         return nil
     end
 
-    return
-
-        (
-            (
-                theirs
-                - mine
-            )
-            / mine
-        )
-        * 100
+    mine, theirs = num(mine), num(theirs)
+    if not mine or not theirs or num(theirs - mine) == nil then return nil end
+    return num(((theirs - mine) / mine) * 100)
 end
 
 
@@ -4292,7 +4481,7 @@ local function scanRemote(name)
                 name
             )
 
-        if direct then
+        if direct and Runtime.remoteEndpointUsable(direct) then
             return direct
         end
 
@@ -4304,6 +4493,7 @@ local function scanRemote(name)
 
             if
                 object.Name == name
+                and Runtime.remoteEndpointUsable(object)
                 and (
                     object:IsA(
                         "RemoteEvent"
@@ -4349,7 +4539,7 @@ local function routerGet(name)
             end
         )
 
-    if ok and result then
+    if ok and result and Runtime.remoteEndpointUsable(result) then
         return result
     end
 
@@ -4365,7 +4555,7 @@ local function routerGet(name)
             end
         )
 
-    if ok2 then
+    if ok2 and Runtime.remoteEndpointUsable(result2) then
         return result2
     end
 
@@ -4390,7 +4580,7 @@ local function resolveRemote(list)
                 name
             )
 
-        if remote then
+        if remote and Runtime.remoteEndpointUsable(remote) then
 
             return
                 remote,
@@ -4402,7 +4592,7 @@ local function resolveRemote(list)
                 name
             )
 
-        if remote then
+        if remote and Runtime.remoteEndpointUsable(remote) then
 
             return
                 remote,
@@ -4426,21 +4616,52 @@ Runtime.tradeRemoteNames = {
     QuickChat = {"TradeAPI/SendQuickChat"},
 }
 Runtime.tradeRemoteRetryAt = {}
+function Runtime.remoteEndpointUsable(remote)
+    if typeof(remote) == "Instance" then
+        local ok, usable = pcall(function()
+            return remote.Parent ~= nil and (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction"))
+        end)
+        return ok and usable == true
+    end
+    if type(remote) == "function" then return true end
+    if type(remote) ~= "table" or rawget(remote, "Destroyed") == true or rawget(remote, "Alive") == false then return false end
+    local fireOK, fire = pcall(function() return remote.FireServer end)
+    local invokeOK, invoke = pcall(function() return remote.InvokeServer end)
+    return (fireOK and type(fire) == "function") or (invokeOK and type(invoke) == "function")
+end
+function Runtime.invalidateTradeRemote(remote)
+    for operation in pairs(Runtime.tradeRemoteNames) do
+        if rawget(TradeRemote, operation) == remote then
+            rawset(TradeRemote, operation, nil)
+            rawset(TradeRemote, operation .. "Name", nil)
+            Runtime.tradeRemoteRetryAt[operation] = nil
+        end
+    end
+end
+function Runtime.staleRemoteFailure(remote, message)
+    if not Runtime.remoteEndpointUsable(remote) then return true end
+    message = tostring(message):lower()
+    for _, marker in ipairs({"destroyed", "not a valid member", "no longer exists", "unsupported remote", "endpoint disconnected"}) do
+        if message:find(marker, 1, true) then return true end
+    end
+    return false
+end
 function Runtime.resolveTradeRemote(operation)
     local names = Runtime.tradeRemoteNames[operation]
     if not names then return nil end
     local existing = rawget(TradeRemote, operation)
-    if existing then return existing end
+    if existing and Runtime.remoteEndpointUsable(existing) then return existing end
+    if existing then Runtime.invalidateTradeRemote(existing) end
     local now = os.clock()
     if now < (Runtime.tradeRemoteRetryAt[operation] or 0) then return nil end
     Runtime.tradeRemoteRetryAt[operation] = now + 1
     local remote, name = resolveRemote(names)
-    if remote then
+    if remote and Runtime.remoteEndpointUsable(remote) then
         rawset(TradeRemote, operation, remote)
         rawset(TradeRemote, operation .. "Name", name)
         Runtime.tradeRemoteRetryAt[operation] = nil
     end
-    return remote
+    return remote and Runtime.remoteEndpointUsable(remote) and remote or nil
 end
 setmetatable(TradeRemote, {__index = function(_, key)
     if Runtime.tradeRemoteNames[key] then return Runtime.resolveTradeRemote(key) end
@@ -4454,11 +4675,18 @@ end
 
 function Runtime.invokeRemote(remote, expected, ...)
     if not remote then return false, "REMOTE MISSING" end
+    if Runtime.remoteEndpointUsable and not Runtime.remoteEndpointUsable(remote) then
+        Runtime.invalidateTradeRemote(remote)
+        return false, "REMOTE ENDPOINT UNAVAILABLE"
+    end
     local function expectedCurrent()
         if not expected then return true end
         if not Settings.autoTrade or expected.context.auto ~= true then return false end
+        if expected.prices ~= false and not Runtime.storageReady() then return false end
         local live, _, mine = Runtime.liveContext(expected.context, expected.mine ~= false, expected.prices ~= false)
-        return live ~= nil and (not expected.proof or Runtime.ownProofCurrent(expected.proof, mine))
+        if not live then return false end
+        if expected.confirmation ~= nil and Runtime.tradeInConfirmation(live) ~= expected.confirmation then return false end
+        return not expected.proof or Runtime.ownProofCurrent(expected.proof, mine)
     end
     if not expectedCurrent() then return false, "REMOTE CANCELLED" end
     Runtime.remoteCalls = Runtime.remoteCalls or {}
@@ -4490,6 +4718,11 @@ function Runtime.invokeRemote(remote, expected, ...)
             error("UNSUPPORTED REMOTE")
         end))
         operation.done = true
+        if result[1] == false and Runtime.staleRemoteFailure and Runtime.staleRemoteFailure(remote, result[2]) then
+            -- Clear only known stale endpoints. TIMEOUT/BUSY/CANCELLED keep their
+            -- uncertainty quarantine and must never cause an automatic resend.
+            Runtime.invalidateTradeRemote(remote)
+        end
         if not operation.abandoned then operation.result = result end
         if Runtime.remoteCalls[remote] == operation then Runtime.remoteCalls[remote] = nil end
     end
@@ -4767,20 +5000,14 @@ function Runtime.ownProofCurrent(proof, mine)
 end
 
 function Runtime.inventorySignature()
-    local now = os.clock()
-    if Runtime.inventorySignatureAt and now - Runtime.inventorySignatureAt < .5 then
-        return Runtime.inventorySignatureValue
-    end
     local signatures = {}
     for _, item in ipairs(inventoryItems()) do
-        signatures[#signatures + 1] = string.format("%q:%q:%q:%q",
-            tostring(itemUID(item)), tostring(item.kind), tostring(item.category), tostring(getVariant(item)))
+        signatures[#signatures + 1] = Runtime.itemValuationSignature(item)
     end
     table.sort(signatures)
-    Runtime.inventorySignatureAt, Runtime.inventorySignatureValue = now, table.concat(signatures, "|")
+    Runtime.inventorySignatureAt, Runtime.inventorySignatureValue = os.clock(), table.concat(signatures, "|")
     return Runtime.inventorySignatureValue
 end
-
 
 local function parseAllowed()
 
@@ -4876,7 +5103,7 @@ local function isAllowed(name, item, selectingAddons)
         parseAllowed()
 
     if next(allowed) == nil then
-        return true
+        return tostring(Settings.allowedItems or ""):match("^%s*$") ~= nil
     end
 
     return
@@ -5198,40 +5425,15 @@ local function optimizeOurOffer(
             end
         end
 
-        table.sort(
-            expanded,
-            function(a, b)
-
-                if
-                    math.abs(
-                        a.total - b.total
-                    )
-                    < 0.000000001
-                    and (
-                        a.petCount
-                        or 0
-                    )
-                    ~= (
-                        b.petCount
-                        or 0
-                    )
-                then
-                    return
-                        (
-                            a.petCount
-                            or 0
-                        )
-                        > (
-                            b.petCount
-                            or 0
-                        )
-                end
-
-                return
-                    a.total
-                    > b.total
-            end
-        )
+        for order, state in ipairs(expanded) do
+            state.sortOrder = order
+            state.sortValue = state.total <= 1000000 and math.floor(state.total * 1e9 + .5) / 1e9 or state.total
+        end
+        table.sort(expanded, function(a, b)
+            if a.sortValue ~= b.sortValue then return a.sortValue > b.sortValue end
+            if (a.petCount or 0) ~= (b.petCount or 0) then return (a.petCount or 0) > (b.petCount or 0) end
+            return a.sortOrder < b.sortOrder
+        end)
 
         local unique =
             {}
@@ -5575,10 +5777,30 @@ local function sendChat(text, expectedContext)
     end, 3, current)
     if not ok then Runtime.lastChatError = tostring(message) return false, Runtime.lastChatError end
     if not current() then return false, "CHAT CANCELLED" end
-    local statusOK, status = pcall(function() return message and message.Status end)
-    if statusOK and status == Enum.TextChatMessageStatus.Success then Runtime.lastChatError=nil return true end
-    Runtime.lastChatError = statusOK and tostring(status or "CHAT UNAVAILABLE") or "CHAT STATUS UNAVAILABLE"
-    return false, Runtime.lastChatError
+    local function deliveryStatus()
+        local ok,status=pcall(function() return message and message.Status end)
+        return ok and status or nil
+    end
+    local status=deliveryStatus()
+    local function pending(value)
+        local name=tostring(value):match("([^%.]+)$")
+        return name=="Sending" or name=="Unknown" or name=="ModerationTimeout"
+    end
+    if pending(status) then
+        local deadline=os.clock()+3
+        for _=1,61 do
+            if not current() then return false,"CHAT CANCELLED" end
+            status=deliveryStatus()
+            if not pending(status) then break end
+            if os.clock()>=deadline then break end
+            Runtime.task.wait(.05)
+        end
+    end
+    if status==Enum.TextChatMessageStatus.Success then Runtime.lastChatError=nil return true end
+    if pending(status) or (message~=nil and status==nil) then
+        Runtime.lastChatError="CHAT DELIVERY UNCERTAIN: " .. tostring(status)
+    else Runtime.lastChatError=tostring(status or "CHAT UNAVAILABLE") end
+    return false,Runtime.lastChatError
 end
 
 --============================================================
@@ -5775,21 +5997,14 @@ local dragging =
 
 local dragStart
 local dragOrigin
+local dragInput
 
 
 Runtime.connect(Top.InputBegan,
     function(input)
-
-        if
-            input.UserInputType
-                == Enum.UserInputType.Touch
-
-            or input.UserInputType
-                == Enum.UserInputType.MouseButton1
-        then
-
-            dragging =
-                true
+        if dragging then return end
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragInput, dragging = input, true
 
             dragStart =
                 input.Position
@@ -5808,16 +6023,10 @@ Runtime.connect(UIS.InputChanged,
             return
         end
 
-        if
-            input.UserInputType
-                ~= Enum.UserInputType.Touch
-
-            and input.UserInputType
-                ~= Enum.UserInputType.MouseMovement
-        then
-
-            return
-        end
+        if not dragInput then return end
+        if dragInput.UserInputType == Enum.UserInputType.Touch then
+            if input ~= dragInput then return end
+        elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
 
         local camera =
             workspace.CurrentCamera
@@ -5879,17 +6088,7 @@ Runtime.connect(UIS.InputChanged,
 Runtime.connect(UIS.InputEnded,
     function(input)
 
-        if
-            input.UserInputType
-                == Enum.UserInputType.Touch
-
-            or input.UserInputType
-                == Enum.UserInputType.MouseButton1
-        then
-
-            dragging =
-                false
-        end
+        if input == dragInput then dragging, dragInput = false, nil end
     end
 )
 
@@ -6360,16 +6559,9 @@ function Runtime.rebuildSearch()
                     )
             then
 
-                local value =
-                    num(
-                        entry.regularValue
-                    )
-                    or num(
-                        entry.value
-                    )
-                    or num(
-                        entry.npRegularValue
-                    )
+                local value
+                if source == "pets" then value = getPetValue(entry, "NP")
+                else value = genericValue(entry) end
 
                 rows[
                     #rows + 1
@@ -6424,6 +6616,7 @@ function Runtime.rebuildSearch()
             row.name
             .. "  ["
             .. row.source
+            .. (row.source == "pets" and " • NP" or "")
             .. "]  = "
             .. valueText(
                 row.value
@@ -6594,6 +6787,8 @@ function Runtime.updateStatusPage()
             .. AMVGG.error
     end
 
+    local storage = Runtime.storageNotice()
+    if storage then lines[#lines + 1] = storage end
     UpdatesText.Text =
         table.concat(
             lines,
@@ -6781,6 +6976,7 @@ local function renderModes()
         )
         or C.PANEL2
 end
+Runtime.registerSettingsUI(renderModes)
 
 
 Runtime.connect(AutoToggle.Activated,
@@ -6960,6 +7156,10 @@ local function bindNumber(
     max
 )
 
+    Runtime.registerSettingsUI(function()
+        local ok,focused=pcall(function() return input:IsFocused() end)
+        if not ok or not focused then input.Text=tostring(Settings[key]) end
+    end)
     Runtime.connect(input.FocusLost,
         function()
 
@@ -7179,6 +7379,7 @@ local function renderMinValueMode()
             activeMinItemValue("theirs")
         )
 end
+Runtime.registerSettingsUI(renderMinValueMode)
 
 
 Runtime.connect(MinValueModeToggle.Activated,
@@ -7234,7 +7435,7 @@ renderMinValueMode()
 
 label(
     TestCanvas,
-    "ALLOWED ITEMS • blank = all",
+    "ALLOWED ITEMS • English names; blank = all",
 
     UDim2.fromOffset(
         360,
@@ -7281,6 +7482,11 @@ AllowedInput.TextWrapped =
     true
 
 
+Runtime.registerSettingsUI(function()
+    local ok,focused=pcall(function() return AllowedInput:IsFocused() end)
+    if not ok or not focused then AllowedInput.Text=Settings.allowedItems end
+    AllowedInput.TextColor3 = normalize(Settings.allowedItems)=="" and not Settings.allowedItems:match("^%s*$") and C.RED or C.TEXT
+end)
 Runtime.connect(AllowedInput.FocusLost,
     function()
 
@@ -7288,6 +7494,7 @@ Runtime.connect(AllowedInput.FocusLost,
             AllowedInput.Text
 
         saveSettings()
+        Runtime.refreshSettingsUI()
     end
 )
 
@@ -7340,6 +7547,7 @@ local function renderChat()
             or "OFF"
         )
 end
+Runtime.registerSettingsUI(renderChat)
 
 
 Runtime.connect(ChatToggle.Activated,
@@ -7613,6 +7821,7 @@ local function renderUnwantedIncoming()
         )
         or C.PANEL2
 end
+Runtime.registerSettingsUI(renderUnwantedIncoming)
 
 Runtime.connect(UnwantedIncomingToggle.Activated,
     function()
@@ -7641,6 +7850,7 @@ do
         OwnPotionsToggle.Text = "OUR OFFER: RIDE / FLY FIRST + ADDS: " .. (Settings.ownPotionsOnly and "ON" or "OFF")
         OwnPotionsToggle.BackgroundColor3 = Settings.ownPotionsOnly and Color3.fromRGB(40,105,70) or C.PANEL2
     end
+    Runtime.registerSettingsUI(renderOwnPotions)
     Runtime.connect(OwnPotionsToggle.Activated, function()
         Settings.ownPotionsOnly = not Settings.ownPotionsOnly
         saveSettings()
@@ -7808,152 +8018,67 @@ local function newPlazaDatabase()
 end
 
 
-local function loadPlazaDatabase()
-
-    local data =
-        newPlazaDatabase()
-
-    if
-        type(isfile)
-            ~= "function"
-        or type(readfile)
-            ~= "function"
-    then
-
-        return data
+function PlazaRouter.copyHistory(data)
+    if type(data) ~= "table" then return nil end
+    local copy = newPlazaDatabase()
+    for id, value in pairs(data.Active) do
+        copy.Active[id] = type(value) == "table" and shallowCopy(value) or value
     end
-
-    local ok,
-        result =
-        pcall(
-            function()
-
-                if
-                    not isfile(
-                        PLAZA_HOP_SETTINGS.SharedFile
-                    )
-                then
-
-                    return nil
-                end
-
-                return
-                    HttpService:
-                    JSONDecode(
-                        readfile(
-                            PLAZA_HOP_SETTINGS.SharedFile
-                        )
-                    )
-            end
-        )
-
-    if
-        ok
-        and type(result)
-            == "table"
-    then
-
-        result.Active =
-            type(result.Active)
-                == "table"
-            and result.Active
-            or {}
-
-        result.Visited =
-            type(result.Visited)
-                == "table"
-            and result.Visited
-            or {}
-
-        return result
-    end
-
-    return data
+    for id, value in pairs(data.Visited) do copy.Visited[id] = value end
+    return copy
 end
 
+function PlazaRouter.historyError(message, kind)
+    PlazaRouter.historyErrors = PlazaRouter.historyErrors or {}
+    PlazaRouter.historyErrors[kind or "write"] = message
+    if message then PlazaRouter.historyFailureEpoch = (PlazaRouter.historyFailureEpoch or 0) + 1 end
+    PlazaRouter.storageError = PlazaRouter.historyErrors.read or PlazaRouter.historyErrors.write
+    Runtime.storageIssue(PLAZA_HOP_SETTINGS.SharedFile, PlazaRouter.storageError)
+end
+
+local function loadPlazaDatabase()
+    local path = PLAZA_HOP_SETTINGS.SharedFile
+    Runtime.fileSchemas[path] = function(data)
+        return type(data.Active) == "table" and type(data.Visited) == "table"
+    end
+    local data, status = loadJSON(path)
+    if status == "ERROR" then
+        PlazaRouter.historyReadFailed = true
+        PlazaRouter.historyError("HISTORY READ FAILED: " .. tostring(Runtime.storageErrors[path]):sub(1, 140), "read")
+        return PlazaRouter.copyHistory(PlazaRouter.historyCache), "ERROR"
+    end
+    if status == "MISSING" then data = newPlazaDatabase() end
+    PlazaRouter.historyReadFailed = false
+    PlazaRouter.historyError(nil, "read")
+    PlazaRouter.historyCache = PlazaRouter.copyHistory(data)
+    return data, status
+end
 
 local function savePlazaDatabase(data)
-    if type(writefile) ~= "function" or type(readfile) ~= "function" then
-        PlazaRouter.storageError = "FILE API UNAVAILABLE"
-        return false
+    if PlazaRouter.historyReadFailed then return false end
+    local path = PLAZA_HOP_SETTINGS.SharedFile
+    Runtime.fileSchemas[path] = function(value)
+        return type(value.Active) == "table" and type(value.Visited) == "table"
     end
-    local ok, err = pcall(function()
-        local encoded = HttpService:JSONEncode(data)
-        writefile(PLAZA_HOP_SETTINGS.SharedFile, encoded)
-        if readfile(PLAZA_HOP_SETTINGS.SharedFile) ~= encoded then error("WRITE VERIFICATION FAILED") end
-    end)
-    PlazaRouter.storageError = not ok and tostring(err):sub(1, 160) or nil
+    local ok, err = saveJSON(path, data)
+    PlazaRouter.historyError(ok and nil or err, "write")
+    if ok then PlazaRouter.historyCache = PlazaRouter.copyHistory(data) end
     return ok
 end
 
-
 local function cleanPlazaDatabase(data)
-
-    local now =
-        os.time()
-
-    for jobId,
-        info in pairs(
-            data.Active
-        )
-    do
-
-        local lastSeen =
-            0
-
-        if type(info) == "table" then
-
-            lastSeen =
-                tonumber(
-                    info.Time
-                )
-                or 0
-
-        elseif type(info) == "number" then
-
-            lastSeen =
-                info
-        end
-
-        if
-            now
-            - lastSeen
-            > PLAZA_HOP_SETTINGS.ActiveServerTimeout
-        then
-
-            data.Active[
-                jobId
-            ] =
-                nil
-        end
+    local now = os.time()
+    for jobId, info in pairs(data.Active) do
+        local timestamp = num(type(info) == "table" and info.Time or info)
+        if not timestamp or timestamp < 0 or timestamp > now + 60
+            or now - timestamp > PLAZA_HOP_SETTINGS.ActiveServerTimeout then data.Active[jobId] = nil end
     end
-
-    for jobId,
-        time in pairs(
-            data.Visited
-        )
-    do
-
-        time =
-            tonumber(
-                time
-            )
-            or 0
-
-        if
-            now
-            - time
-            > PLAZA_HOP_SETTINGS.RecentServerMemory
-        then
-
-            data.Visited[
-                jobId
-            ] =
-                nil
-        end
+    for jobId, value in pairs(data.Visited) do
+        local timestamp = num(value)
+        if not timestamp or timestamp < 0 or timestamp > now + 60
+            or now - timestamp > PLAZA_HOP_SETTINGS.RecentServerMemory then data.Visited[jobId] = nil end
     end
 end
-
 
 local function markCurrentPlazaServer()
 
@@ -7966,8 +8091,8 @@ local function markCurrentPlazaServer()
         return
     end
 
-    local data =
-        loadPlazaDatabase()
+    local data, loadStatus = loadPlazaDatabase()
+    if not data or loadStatus == "ERROR" then return false end
 
     cleanPlazaDatabase(
         data
@@ -8011,8 +8136,8 @@ local function clearCurrentPlazaActive()
         return
     end
 
-    local data =
-        loadPlazaDatabase()
+    local data, loadStatus = loadPlazaDatabase()
+    if not data or loadStatus == "ERROR" then return false end
 
     cleanPlazaDatabase(
         data
@@ -8134,13 +8259,15 @@ end
 
 
 function PlazaRouter.operationCurrent(generation)
-    return Runtime.alive() and Gui.Parent ~= nil and Settings.plazaAutoRoute
+    return Runtime.alive() and Gui.Parent ~= nil and Runtime.configurationReady() and Settings.plazaAutoRoute
         and (generation == nil or generation == (PlazaRouter.operationGeneration or 0))
 end
 
-local function decodeHTTPJSON(url)
+local function decodeHTTPJSON(url, budgetDeadline)
     local generation = PlazaRouter.operationGeneration or 0
     local function current() return PlazaRouter.operationCurrent(generation) end
+    local timeout = math.min(8, math.min(PlazaRouter.operationDeadline or (os.clock()+8.2), budgetDeadline or (os.clock()+8.2)) - os.clock() - .2)
+    if timeout <= .05 or not current() then return nil end
     local ok, body = Runtime.runBounded(function()
         if type(REQUEST) == "function" then
             local requested, response = pcall(REQUEST, {
@@ -8160,7 +8287,7 @@ local function decodeHTTPJSON(url)
         end
         if not current() then return nil end
         return game:HttpGet(url, true)
-    end, 8, current)
+    end, timeout, current)
     if not ok or not current() or type(body) ~= "string" then return nil end
     local decodedOK, decoded = pcall(function() return HttpService:JSONDecode(body) end)
     if decodedOK and current() and type(decoded) == "table" then return decoded end
@@ -8168,62 +8295,47 @@ end
 
 
 local function getUniversePlacesForPlaza()
-
-    local universeId =
-        tonumber(
-            game.GameId
-        )
-
-    if
-        not universeId
-        or universeId <= 0
-    then
-
-        return {}
-    end
-
+    local universeId = tonumber(game.GameId)
+    if not universeId or universeId <= 0 then return {} end
+    local generation = PlazaRouter.operationGeneration or 0
+    local deadline = math.min(PlazaRouter.operationDeadline or (os.clock() + 10), os.clock() + 10)
     local urls = {
-
-        "https://develop.roblox.com/v1/universes/"
-        .. tostring(
-            universeId
-        )
-        .. "/places?limit=100&sortOrder=Asc",
-
-        "https://apis.roblox.com/universes/v1/universes/"
-        .. tostring(
-            universeId
-        )
-        .. "/places?limit=100&sortOrder=Asc",
+        "https://develop.roblox.com/v1/universes/" .. tostring(universeId) .. "/places?limit=100&sortOrder=Asc",
+        "https://apis.roblox.com/universes/v1/universes/" .. tostring(universeId) .. "/places?limit=100&sortOrder=Asc",
     }
-
-    for _,
-        url in ipairs(
-            urls
-        )
-    do
-
-        local decoded =
-            decodeHTTPJSON(
-                url
-            )
-
-        if
-            type(decoded)
-                == "table"
-            and type(decoded.data)
-                == "table"
-            and #decoded.data > 0
-        then
-
-            return
-                decoded.data
-        end
+    local function current()
+        return Runtime.alive() and os.clock() < deadline
+            and generation == (PlazaRouter.operationGeneration or 0)
+            and PlazaRouter.operationCurrent(generation)
     end
-
+    for _, base in ipairs(urls) do
+        local places, seen, cursors, cursor = {}, {}, {}, nil
+        for _ = 1, 10 do
+            if not current() then return {} end
+            local url = base
+            if cursor then
+                local encoded = cursor:gsub("[^%w%-_%.~]", function(char) return string.format("%%%02X", char:byte()) end)
+                url = base .. "&cursor=" .. encoded
+            end
+            local decoded = decodeHTTPJSON(url, deadline)
+            if not current() then return {} end
+            if type(decoded) ~= "table" or type(decoded.data) ~= "table" then break end
+            for _, info in ipairs(decoded.data) do
+                local id = type(info) == "table" and tonumber(info.id or info.Id)
+                if id and id > 0 and not seen[id] then
+                    seen[id] = true
+                    places[#places + 1] = info
+                end
+            end
+            cursor = decoded.nextPageCursor
+            if cursor == nil or cursor == "" then break end
+            if type(cursor) ~= "string" or #cursor > 2048 or cursors[cursor] then break end
+            cursors[cursor] = true
+        end
+        if #places > 0 then return places end
+    end
     return {}
 end
-
 
 local function getCurrentPlaceName()
     local generation = PlazaRouter.operationGeneration or 0
@@ -8290,13 +8402,13 @@ local function discoverTradingPlazaPlaces()
         end
     end
 
-    -- Reliable fallback for the current 2026 Trading Hub.
+    -- Use the known Hub after suitable places returned by discovery.
     if not seen[KNOWN_TRADING_HUB_PLACE_ID] then
         seen[KNOWN_TRADING_HUB_PLACE_ID] = true
         result[#result + 1] = {
             Id = KNOWN_TRADING_HUB_PLACE_ID,
             Name = "Trading Hub",
-            Score = 110,
+            Score = 1,
         }
     end
 
@@ -8344,91 +8456,43 @@ local function shufflePlazaList(list)
 end
 
 
-local function getPlazaServers(placeId)
-
-    local servers =
-        {}
-
-    local cursor =
-        nil
-
-    for _ =
-        1,
-        PLAZA_HOP_SETTINGS.MaxPages
-    do
-
-        local url =
-            "https://games.roblox.com/v1/games/"
-            .. tostring(
-                placeId
-            )
-            .. "/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100"
-
-        if
-            cursor
-            and cursor ~= ""
-        then
-
-            url =
-                url
-                .. "&cursor="
-                .. HttpService:
-                    UrlEncode(
-                        cursor
-                    )
+local function getPlazaServers(placeId,onPage)
+    PlazaRouter.serverScans=PlazaRouter.serverScans or {}
+    local key=tostring(placeId)
+    local previous=PlazaRouter.serverScans[key]
+    local cursor=previous and os.clock()<previous.expires and previous.cursor or nil
+    local servers,visited={},{}
+    local generation=PlazaRouter.operationGeneration or 0
+    for _=1,PLAZA_HOP_SETTINGS.MaxPages do
+        if not PlazaRouter.operationCurrent(generation)
+            or (PlazaRouter.operationDeadline and os.clock()>=PlazaRouter.operationDeadline-.25) then break end
+        local marker=cursor or "FIRST"
+        if visited[marker] then PlazaRouter.serverScans[key]=nil break end
+        visited[marker]=true
+        local url="https://games.roblox.com/v1/games/" .. key .. "/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100"
+        if cursor and cursor~="" then url ..= "&cursor=" .. HttpService:UrlEncode(cursor) end
+        local decoded=decodeHTTPJSON(url)
+        if type(decoded)~="table" or not PlazaRouter.operationCurrent(generation) then break end
+        local page={}
+        for _,server in ipairs(type(decoded.data)=="table" and decoded.data or {}) do
+            if type(server)=="table" and server.id then servers[#servers+1],page[#page+1]=server,server end
         end
-
-        local decoded =
-            decodeHTTPJSON(
-                url
-            )
-
-        if
-            type(decoded)
-                ~= "table"
-        then
-
-            break
+        local nextCursor=type(decoded.nextPageCursor)=="string" and decoded.nextPageCursor~="" and decoded.nextPageCursor or nil
+        -- Advance before returning a selected target: failed reservations or
+        -- teleports must not keep scanning the same already examined pages.
+        if nextCursor and nextCursor~=cursor and not visited[nextCursor] then
+            PlazaRouter.serverScans[key]={cursor=nextCursor,expires=os.clock()+300}
+        else PlazaRouter.serverScans[key]=nil end
+        if onPage then
+            local target=onPage(page)
+            if target then return servers,target end
         end
-
-        if
-            type(decoded.data)
-                == "table"
-        then
-
-            for _,
-                server in ipairs(
-                    decoded.data
-                )
-            do
-
-                if server.id then
-
-                    servers[
-                        #servers + 1
-                    ] =
-                        server
-                end
-            end
-        end
-
-        cursor =
-            decoded.nextPageCursor
-
-        if
-            not cursor
-            or cursor == ""
-        then
-
-            break
-        end
-
+        if not nextCursor or nextCursor==cursor or visited[nextCursor] then break end
+        cursor=nextCursor
         Runtime.task.wait()
     end
-
     return servers
 end
-
 
 local function plazaServerAllowed(
     serverId,
@@ -8464,10 +8528,11 @@ local function reservePlazaServer(
     placeId,
     serverId
 )
-    if type(serverId) ~= "string" or serverId == "" or not PlazaRouter.ownsServer(serverId) then return false end
+    local generation = PlazaRouter.operationGeneration or 0
+    if not PlazaRouter.operationCurrent(generation) or type(serverId) ~= "string" or serverId == "" or not PlazaRouter.ownsServer(serverId) then return false end
 
-    local data =
-        loadPlazaDatabase()
+    local data, loadStatus = loadPlazaDatabase()
+    if not data or loadStatus == "ERROR" then return false end
 
     cleanPlazaDatabase(
         data
@@ -8507,7 +8572,18 @@ local function reservePlazaServer(
     ] =
         os.time()
 
-    return savePlazaDatabase(data)
+    PlazaRouter.reservations = PlazaRouter.reservations or {}
+    local target = {PlaceId=placeId, JobId=serverId,
+        reservation=tostring(PlazaRouter.operationGeneration or 0) .. ":" .. tostring(os.clock())}
+    data.Active[serverId].Reservation = target.reservation
+    -- Register ownership inside the worker before saving or returning its result.
+    PlazaRouter.reservations[serverId] = target
+    local saved = savePlazaDatabase(data)
+    if not saved or not PlazaRouter.operationCurrent(generation) then
+        if PlazaRouter.releaseReservation then PlazaRouter.releaseReservation(target) end
+        return false
+    end
+    return true
 end
 
 
@@ -8515,18 +8591,14 @@ local function findNewPlazaServer(placeId)
 
     local generation = PlazaRouter.operationGeneration or 0
 
-    local database =
-        loadPlazaDatabase()
+    local database, loadStatus = loadPlazaDatabase()
+    if not database or loadStatus == "ERROR" then return nil end
 
     cleanPlazaDatabase(
         database
     )
 
-    local servers =
-        getPlazaServers(
-            placeId
-        )
-
+    local function choose(servers)
     if not PlazaRouter.operationCurrent(generation) then return nil end
 
     shufflePlazaList(
@@ -8627,30 +8699,43 @@ local function findNewPlazaServer(placeId)
     end
 
     return nil
+    end
+    local _, target = getPlazaServers(placeId, choose)
+    return target
 end
 
 
 local function releasePlazaReservation(target)
     if not target or not target.JobId then return end
-    local data = loadPlazaDatabase()
+    local owned = (PlazaRouter.reservations or {})[target.JobId] or target
+    local data, loadStatus = loadPlazaDatabase()
+    if not data or loadStatus == "ERROR" then return false end
     local info = data.Active[target.JobId]
-    if type(info) == "table" and info.Owner == PLAZA_CLONE_ID then
+    if type(info) == "table" and info.Owner == PLAZA_CLONE_ID
+        and (not owned.reservation or info.Reservation == owned.reservation) then
         data.Active[target.JobId], data.Visited[target.JobId] = nil, nil
-        savePlazaDatabase(data)
+        if not savePlazaDatabase(data) then return false end
     end
+    if PlazaRouter.reservations then PlazaRouter.reservations[target.JobId] = nil end
+    return true
 end
+PlazaRouter.releaseReservation = releasePlazaReservation
+
+
 
 function PlazaRouter.runOperation(fn)
     PlazaRouter.operationGeneration = (PlazaRouter.operationGeneration or 0) + 1
     local generation = PlazaRouter.operationGeneration
     local function current() return PlazaRouter.operationCurrent(generation) end
+    PlazaRouter.operationDeadline = os.clock() + 30
     local ok, result = Runtime.runBounded(fn, 30, current)
     if PlazaRouter.operationGeneration ~= generation then return false, "ROUTER CANCELLED" end
-    PlazaRouter.operationGeneration = generation + 1
+    PlazaRouter.operationGeneration, PlazaRouter.operationDeadline = generation + 1, nil
     if not ok then
         local target = PlazaRouter.preparedTarget
         PlazaRouter.preparedTarget = nil
         releasePlazaReservation(target)
+        for _, owned in pairs(table.clone(PlazaRouter.reservations or {})) do releasePlazaReservation(owned) end
         PlazaRouter.preparing, PlazaRouter.readyForTrading, PlazaRouter.clearSince = false, true, nil
         PlazaRouter.retryAt = os.clock() + PLAZA_HOP_SETTINGS.RetrySeconds
     end
@@ -8673,9 +8758,11 @@ end
 
 local function plazaTradeClear()
     local state = Runtime.state
-    local pendingRequest = state and state.target and state.requestStarted
-        and state.target.Parent and os.clock() - state.requestStarted < Settings.requestTimeout
-    if getTrade() or pendingRequest then
+    local pendingRequest = state and state.target and state.target.Parent
+        and (state.requestSendingAt ~= nil or (state.requestStarted ~= nil
+            and os.clock() < (state.requestUncertainUntil or (state.requestStarted + Settings.requestTimeout))))
+    local live,status=getTrade()
+    if status=="ERROR" or live or pendingRequest then
         PlazaRouter.clearSince = nil
         return false
     end
@@ -8687,7 +8774,7 @@ local function teleportToPlazaTarget(placeId, serverId)
     local target = {PlaceId = placeId, JobId = serverId}
     -- This is the final guard after HTTP and reservation work. No yield is
     -- permitted between this check and initiating the teleport.
-    if not Runtime.alive() or not Gui.Parent or not Settings.plazaAutoRoute
+    if not Runtime.alive() or not Gui.Parent or not Runtime.configurationReady() or not Settings.plazaAutoRoute
         or PlazaRouter.teleporting or not plazaTradeClear() then
         releasePlazaReservation(target)
         return false
@@ -8850,41 +8937,19 @@ local function routeNormalServerToPlaza()
         return false
     end
 
-    local targetPlace =
-        plazaPlaces[1]
-
-    plazaLog(
-        "NORMAL SERVER DETECTED -> TRADING PLAZA",
-        targetPlace.Name,
-        "PLACE=",
-        targetPlace.Id
-    )
-
-    setTestStatus(
-        "NORMAL SERVER • TELEPORTING TO TRADING PLAZA",
-        C.YELLOW
-    )
-
-    local targetServer =
-        findNewPlazaServer(
-            targetPlace.Id
-        )
-
-    if targetServer then
-
-        plazaLog(
-            "ROUTE SERVER",
-            targetServer.JobId,
-            targetServer.Playing
-            .. "/"
-            .. targetServer.MaxPlayers
-        )
-
-        return
-            teleportToPlazaTarget(
-                targetServer.PlaceId,
-                targetServer.JobId
-            )
+    for _, targetPlace in ipairs(plazaPlaces) do
+        if not PlazaRouter.operationCurrent(generation) then return false end
+        plazaLog("NORMAL SERVER -> TRADING PLAZA", targetPlace.Name, "PLACE=", targetPlace.Id)
+        setTestStatus("NORMAL SERVER • FINDING TRADING PLAZA", C.YELLOW)
+        local historyFailures = PlazaRouter.historyFailureEpoch or 0
+        local ok, targetServer = pcall(findNewPlazaServer, targetPlace.Id)
+        if not PlazaRouter.operationCurrent(generation) then return false end
+        if ok and targetServer then
+            plazaLog("ROUTE SERVER", targetServer.JobId, targetServer.Playing .. "/" .. targetServer.MaxPlayers)
+            return teleportToPlazaTarget(targetServer.PlaceId, targetServer.JobId)
+        end
+        if not ok then plazaLog("PLAZA CANDIDATE FAILED", targetPlace.Id, tostring(targetServer)) end
+        if (PlazaRouter.historyFailureEpoch or 0) ~= historyFailures then break end
     end
 
     -- A random destination would bypass the per-clone partition.
@@ -8941,6 +9006,7 @@ Runtime.connect(TeleportService.TeleportInitFailed, function(player, _, message,
     teleportFailed(message)
 end)
 Runtime.cleanups[#Runtime.cleanups + 1] = function()
+    for _, target in pairs(table.clone(PlazaRouter.reservations or {})) do releasePlazaReservation(target) end
     releasePlazaReservation(PlazaRouter.preparedTarget)
     if PlazaRouter.pendingTeleport then releasePlazaReservation(PlazaRouter.pendingTeleport.target) end
     clearCurrentPlazaActive()
@@ -8959,6 +9025,8 @@ Runtime.task.spawn(function()
             if now - PlazaRouter.pendingTeleport.started >= 45 then
                 teleportFailed("No completed departure within 45 seconds")
             end
+        elseif not Runtime.configurationReady() then
+            PlazaRouter.preparing,PlazaRouter.clearSince=false,nil
         elseif not Settings.plazaAutoRoute then
             PlazaRouter.preparing, PlazaRouter.readyForTrading, PlazaRouter.clearSince = false, true, nil
         elseif now >= (PlazaRouter.retryAt or 0) then
@@ -9183,6 +9251,8 @@ local PlayerCooldowns =
 
 
 local function resetState()
+    State.requestSendingAt, State.requestUncertainUntil = nil, nil
+    State.chatAskAttempts, State.askSent = nil, nil
     State.noStockStarted = nil
     Runtime.potionAddonPlan = nil
     State.firstAcceptObserved, State.firstAcceptSentAt, State.emptyTheirSince = nil, nil, nil
@@ -9296,6 +9366,9 @@ local function randomPlayer()
     local now =
         os.clock()
 
+    for id,expires in pairs(PlayerCooldowns) do
+        if now>=expires then PlayerCooldowns[id]=nil end
+    end
     for _,
         player in ipairs(
             Players:GetPlayers()
@@ -9350,8 +9423,12 @@ local function sendTrade(player)
         if not allowed() or getTrade() then return false end
         local ok, result = remoteCall(TradeRemote.SendRequest, argument)
         if not allowed() then return false end
-        if ok and result ~= false then return true end
-        if result == "REMOTE TIMEOUT" or result == "REMOTE CANCELLED" or result == "REMOTE BUSY" then return false end
+        if ok and result ~= false then return true, "SENT" end
+        if not ok then
+            if result == "REMOTE TIMEOUT" or result == "REMOTE CANCELLED" or result == "REMOTE BUSY"
+                or result == "REMOTE MISSING" or result == "REMOTE ENDPOINT UNAVAILABLE" then return false,result end
+            return false,"REMOTE UNCERTAIN: " .. tostring(result)
+        end
     end
     return false
 end
@@ -9457,8 +9534,11 @@ local function unaccept(myOffer)
     return false
 end
 
-local function decline()
-    local live = getTrade()
+local function decline(expectedContext)
+    if not Settings.autoTrade then return false end
+    local context = expectedContext or Runtime.captureTrade(getTrade())
+    local live = Runtime.liveContext(context, false, false)
+    if not live then return false end
     local mine, _, _, partner = getTradeSides(live)
     if not mine or (State.tradeID and tostring(live.trade_id or live.id or playerName(partner)) ~= State.tradeID) then return false end
     local key = Runtime.tradeKey(live, partner)
@@ -9468,11 +9548,11 @@ local function decline()
     if pending.busy or (pending.lastAttempt and os.clock() - pending.lastAttempt < 2) then return false end
     if not TradeRemote.Decline then return false end
     pending.lastAttempt, pending.busy = os.clock(), true
-    local ok, result = remoteCall(TradeRemote.Decline)
+    local ok, result = Runtime.invokeRemote(TradeRemote.Decline, {context=context, mine=false, prices=false})
     pending.busy = false
-    local current = getTrade()
+    local current = Runtime.liveContext(context, false, false)
     local currentMine, _, _, currentPartner = getTradeSides(current)
-    if State.declineRequested ~= pending then return false end
+    if not current or State.declineRequested ~= pending then return false end
     if not currentMine or Runtime.tradeKey(current, currentPartner) ~= key then return ok and result ~= false end
     State.declineSent = ok and result ~= false
     testLog(State.declineSent and "DECLINE SENT • WAIT TRADE CLOSED" or "DECLINE FAILED • RETRY")
@@ -9481,7 +9561,8 @@ end
 
 -- Cancellation is kept separate from GUI and ordinary Runtime cleanup.
 function Runtime.beginAcceptanceCancellation(reason, expectedContext)
-    local live = getTrade()
+    local live,readStatus=getTrade()
+    if readStatus=="ERROR" then live=Runtime.lastTrustedTrade end
     local mine, _, _, partner = getTradeSides(live)
     local key = Runtime.tradeKey(live, partner)
     if not mine or not key or (expectedContext and expectedContext.key ~= key) then return end
@@ -9495,18 +9576,22 @@ function Runtime.beginAcceptanceCancellation(reason, expectedContext)
     local pending = {key=key, since=os.clock(), reason=reason, calls={}, mustClose=uncertain==true, riskUntil=uncertain and math.max(os.clock()+12,request.expires) or os.clock()+12}
     ENV.__AM_ANALYZER_CANCELLATION, Runtime.stopAcceptance = pending, pending
     local function current()
-        if ENV.__AM_ANALYZER_CANCELLATION ~= pending then return nil end
-        local trade = getTrade()
-        local own, _, _, other = getTradeSides(trade)
-        if not own or Runtime.tradeKey(trade, other) ~= pending.key then return nil end
-        return trade, own
+        if ENV.__AM_ANALYZER_CANCELLATION ~= pending then return nil,nil,"REPLACED" end
+        local trade,status=getTrade()
+        if status=="ERROR" then return nil,nil,"ERROR" end
+        if status=="ABSENT" then return nil,nil,"ABSENT" end
+        local own,_,_,other=getTradeSides(trade)
+        local liveKey=Runtime.tradeKey(trade,other)
+        if not own or not liveKey then return nil,nil,"ERROR" end
+        if liveKey~=pending.key then return nil,nil,"REPLACED" end
+        return trade,own,"FOUND"
     end
     local function finish()
         if ENV.__AM_ANALYZER_CANCELLATION == pending then ENV.__AM_ANALYZER_CANCELLATION=nil end
         if Runtime.stopAcceptance == pending then Runtime.stopAcceptance=nil end
     end
     local function issue(operation)
-        local remote = TradeRemote[operation]
+        local remote = Runtime.resolveTradeRemote(operation)
         if not remote then return end
         local previous = pending.calls[operation]
         if previous and ((not previous.done and os.clock()-previous.since<30) or os.clock()-previous.since<2) then return end
@@ -9514,7 +9599,7 @@ function Runtime.beginAcceptanceCancellation(reason, expectedContext)
         pending.calls[operation] = call
         local function invoke()
             if not current() then call.done=true return end
-            pcall(function()
+            local ok,err=pcall(function()
                 if typeof(remote) == "Instance" then
                     if remote:IsA("RemoteEvent") then remote:FireServer()
                     elseif remote:IsA("RemoteFunction") then remote:InvokeServer() end
@@ -9524,19 +9609,22 @@ function Runtime.beginAcceptanceCancellation(reason, expectedContext)
                     elseif type(remote.InvokeServer) == "function" then remote:InvokeServer() end
                 end
             end)
+            if not ok and Runtime.staleRemoteFailure(remote,err) then Runtime.invalidateTradeRemote(remote) end
             call.done = true
         end
         if type(native.spawn) == "function" then native.spawn(invoke)
         else local co=coroutine.create(invoke) coroutine.resume(co) end
     end
     function pending.tick()
-        local trade, own = current()
+        local trade, own, status = current()
+        if status=="ERROR" then return end
         if not trade then finish() return end
         local isAccepted = accepted(own) or Runtime.tradeInConfirmation(trade)
         if not pending.mustClose and not isAccepted and os.clock() >= pending.riskUntil then finish() return end
         if os.clock()-pending.since >= 12 then issue("Decline")
         elseif isAccepted then issue("Unaccept") end
-        trade, own = current()
+        trade, own, status = current()
+        if status=="ERROR" then return end
         if not trade or (not pending.mustClose and not accepted(own) and not Runtime.tradeInConfirmation(trade) and os.clock()>=pending.riskUntil) then finish() end
     end
     pending.tick()
@@ -9690,6 +9778,12 @@ local function evaluateTrade(
             nil,
     }
 
+    if mine.numericError or theirs.numericError
+        or num(mine.total) == nil or num(theirs.total) == nil
+        or num(mine.effectiveTotal) == nil or num(theirs.effectiveTotal) == nil then
+        result.blocked, result.reason = true, "INVALID VALUE TOTAL"
+        return result
+    end
     if mine.integrityError or theirs.integrityError then
         result.blocked, result.reason = true, "DUPLICATE ITEM UID"
         return result
@@ -9845,6 +9939,10 @@ local function evaluateTrade(
             theirs.total
         )
 
+    if mine.total > 0 and result.profit == nil then
+        result.blocked, result.reason = true, "INVALID VALUE PROFIT"
+        return result
+    end
     if Settings.autoTrade then
         result.valid = mine.total > 0
             and mine.total <= theirs.effectiveTotal + 0.000000001
@@ -9898,6 +9996,7 @@ end
 
 
 local function secureAccept(trade, myOffer, theirOffer, expectedContext)
+    if not Runtime.storageReady() then unaccept(myOffer) return false end
     if expectedContext and not Runtime.liveContext(expectedContext, true, true) then return false end
     local context = Runtime.captureTrade(trade)
     local live, _, mine, theirs = Runtime.liveContext(context, true, true)
@@ -9920,7 +10019,12 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if live then unaccept(mine) end
         return false
     end
-    if not Runtime.liveContext(context, true, true) then return false end
+    live, _, mine, theirs = Runtime.liveContext(context, true, true)
+    if not live then return false end
+    local currentEvaluation = evaluateTrade(mine, theirs)
+    live, _, mine, theirs = Runtime.liveContext(context, true, true)
+    if not live or not Settings.autoTrade or Runtime.cancellationPending(context.key) then return false end
+    if currentEvaluation.blocked or not currentEvaluation.valid then unaccept(mine) return false end
     local signature = fullSignature(mine, theirs)
 
     if Runtime.tradeInConfirmation(live) then
@@ -9945,6 +10049,13 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if final.blocked or not final.valid then unaccept(mine) return false end
         proof = Runtime.ownOfferProof(context, mine)
         if not proof then if Runtime.liveContext(context,true,true) then unaccept(mine) end return false end
+        live, _, mine, theirs = Runtime.liveContext(context, true, true)
+        if not live or not Runtime.tradeInConfirmation(live) or State.unacceptRequired or State.declineRequested then return false end
+        local latest = evaluateTrade(mine, theirs)
+        live, _, mine, theirs = Runtime.liveContext(context, true, true)
+        if not live or not Runtime.tradeInConfirmation(live) or Runtime.cancellationPending(context.key)
+            or State.unacceptRequired or State.declineRequested then return false end
+        if latest.blocked or not latest.valid then unaccept(mine) return false end
         if confirmed(mine) then State.confirmPending = nil return true end
         local pending = State.confirmPending
         if pending and (pending.key ~= context.key or pending.signature ~= signature) then
@@ -9954,7 +10065,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if pending then
             if os.clock() - pending.since >= 12 then
                 setTestStatus("CONFIRM NOT OBSERVED • DECLINING", C.RED)
-                decline()
+                decline(context)
                 return false
             end
             if pending.acknowledged or os.clock() - pending.lastAttempt < 2 then
@@ -9965,7 +10076,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if not TradeRemote.Confirm then return false end
         if not pending then pending = {key=context.key, signature=signature, since=os.clock()} State.confirmPending = pending end
         pending.lastAttempt = os.clock()
-        local ok, result = Runtime.invokeRemote(TradeRemote.Confirm, {context=context, proof=proof})
+        local ok, result = Runtime.invokeRemote(TradeRemote.Confirm, {context=context, proof=proof, confirmation=true})
         if not Runtime.liveContext(context, true, true) then return false end
         if not ok or result == false then testLog("CONFIRM FAILED") return false end
         if State.confirmPending ~= pending then return false end
@@ -9976,7 +10087,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
 
     if not accepted(mine) then
         if State.firstAcceptSignature == signature and State.firstAcceptAt then
-            if os.clock() - (State.firstAcceptSentAt or State.firstAcceptAt) >= 12 then decline() return false end
+            if os.clock() - (State.firstAcceptSentAt or State.firstAcceptAt) >= 12 then decline(context) return false end
             setTestStatus("ACCEPT SENT • WAIT LIVE RESULT", C.YELLOW)
             return true
         end
@@ -9984,7 +10095,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if not Runtime.liveContext(context, true, true) or not Runtime.ownProofCurrent(proof,mine) then return false end
         local request = {key=context.key, signature=signature, since=os.clock(), expires=os.clock()+30}
         Runtime.acceptPending = request
-        local ok, result = Runtime.invokeRemote(TradeRemote.Accept, {context=context, proof=proof, acceptRecord=request})
+        local ok, result = Runtime.invokeRemote(TradeRemote.Accept, {context=context, proof=proof, acceptRecord=request, confirmation=false})
         request.done, request.acknowledged = true, ok and result ~= false
         if not request.started or (ok and result==false) then
             if Runtime.acceptPending == request then Runtime.acceptPending=nil end
@@ -10129,7 +10240,7 @@ testLog(
 -- No partner inventory request, inventory observer or Suggest Item worker.
 function Runtime.uncertainResult(reason)
     reason=tostring(reason or "")
-    return reason:find("TIMEOUT",1,true)~=nil or reason:find("CANCEL",1,true)~=nil or reason:find("BUSY",1,true)~=nil
+    return reason:find("TIMEOUT",1,true)~=nil or reason:find("CANCEL",1,true)~=nil or reason:find("BUSY",1,true)~=nil or reason:find("UNCERTAIN",1,true)~=nil
 end
 
 InventoryFlow = {}
@@ -10139,8 +10250,12 @@ do
     if type(previous) == "table" and type(previous.stop) == "function" then pcall(previous.stop, "inventory automation removed") end
     ENV.__AM_ANALYZER_INVENTORY_FLOW = InventoryFlow
     Runtime.flow = InventoryFlow
-    function InventoryFlow.stop()
-        InventoryFlow.greetedTrade, InventoryFlow.greetingAttempt = nil, nil
+    function InventoryFlow.stop(reason)
+        if reason == "trade state reset" or reason == "partner changed inside current trade" or not Runtime.alive() then
+            InventoryFlow.greetedTrade, InventoryFlow.greetingAttempt = nil, nil
+        elseif InventoryFlow.greetingAttempt and InventoryFlow.greetingAttempt.busy then
+            InventoryFlow.greetingAttempt.busy, InventoryFlow.greetingAttempt.uncertain = false, true
+        end
     end
     function InventoryFlow.engaged() return false end
     function InventoryFlow.holdAccept() return false end
@@ -10172,6 +10287,30 @@ end
         return sendChat(fallback,context)
     end
 
+    function Runtime.sendAddRequest(partner, context, slot, signature)
+        if not Settings.chatRequests then return false, nil end
+        if not Runtime.liveContext(context, true, false) then return false, nil end
+        MainState.chatAskAttempts = MainState.chatAskAttempts or {}
+        local key = context.key .. "|" .. signature
+        local attempt = MainState.chatAskAttempts[slot]
+        if not attempt or attempt.key ~= key then
+            attempt = {key=key, count=0, nextAt=0, since=os.clock()}
+            MainState.chatAskAttempts[slot] = attempt
+        end
+        if attempt.sent then return true, attempt end
+        if attempt.busy or attempt.uncertain or attempt.count >= 3 or os.clock() < attempt.nextAt then return false, attempt end
+        attempt.busy, attempt.count = true, attempt.count + 1
+        local ok, reason = InventoryFlow.sendQuickChat(partner, 4, "please add +")
+        attempt.busy, attempt.nextAt = false, os.clock() + 2
+        attempt.reason = reason
+        if ok then attempt.sent = true
+        elseif Runtime.uncertainResult(reason) then attempt.uncertain = true end
+        if not Runtime.liveContext(context, true, false) or not MainState.chatAskAttempts
+            or MainState.chatAskAttempts[slot] ~= attempt then return false, nil end
+        if not ok then testLog("ASK CHAT FAILED", attempt.count, reason or "DELIVERY REJECTED") end
+        return ok, attempt
+    end
+
     function InventoryFlow.step(trade,partner)
         if not Settings.autoTrade or not Settings.chatRequests then return false end
         local key=MainState.tradeID
@@ -10185,9 +10324,13 @@ end
         attempt.busy=true attempt.count+=1 attempt.nextAt=os.clock()+2
         local ok,reason=InventoryFlow.sendQuickChat(partner,1,"👋 Lets, trade")
         attempt.busy=false
+        -- Preserve the outcome even if prices or our offer changed during send.
+        -- A different trade/partner resets this history explicitly.
+        if InventoryFlow.greetingAttempt == attempt then
+            if ok then InventoryFlow.greetedTrade=key
+            elseif Runtime.uncertainResult(reason) then attempt.uncertain=true end
+        end
         if not Runtime.liveContext(context,true,true) then return false end
-        if ok then InventoryFlow.greetedTrade=key
-        elseif Runtime.uncertainResult(reason) then attempt.uncertain=true end
         return false
     end
 
@@ -10195,16 +10338,22 @@ end
 end
 
 
-function Runtime.waitForPotionStock()
+function Runtime.waitForPotionStock(expectedContext)
     State.noStockStarted = State.noStockStarted or os.clock()
     State.optimizedSignature, State.optimizedOurSignature = nil, nil
     State.askStarted, State.askSignature = nil, nil
     local remaining = math.max(0, 30 - (os.clock() - State.noStockStarted))
     setTestStatus(string.format("NO AVAILABLE RIDE / FLY POTIONS • %.0fs", remaining), C.YELLOW)
-    if remaining <= 0 then decline() end
+    if remaining <= 0 then decline(expectedContext) end
 end
 
 local function manageAutoTrade(trade)
+    if not Runtime.storageReady() then
+        Runtime.beginAcceptanceCancellation("Saved data unavailable", Runtime.captureTrade(trade))
+        setTestStatus("AUTO BLOCKED • RESTORE SAVED SETTINGS / NEW HISTORY", C.RED)
+        return
+    end
+    if not Settings.autoTrade then return end
     if not Runtime.tradeID(trade) then
         setTestStatus("AUTO BLOCKED • MISSING TRADE ID", C.RED)
         return
@@ -10278,20 +10427,26 @@ local function manageAutoTrade(trade)
         > Settings.maxTradeSeconds
     then
 
-        decline()
+        decline(operationContext)
         return
     end
 
-    if State.declineRequested then decline() return end
-    if State.unacceptRequired and os.clock() - State.unacceptRequired.since >= 12 then
-        setTestStatus("UNACCEPT TIMED OUT • DECLINING", C.RED)
-        decline()
-        return
-    end
+    if State.declineRequested then decline(operationContext) return end
     if State.unacceptRequired then
-        if not unaccept(myOffer) then setTestStatus("WAIT UNACCEPT • RETRY", C.YELLOW) return end
+        if not accepted(myOffer) and not Runtime.tradeInConfirmation(trade) then
+            State.unacceptRequired = nil
+            Runtime.clearAcceptState()
+        elseif os.clock() - State.unacceptRequired.since >= 12 then
+            setTestStatus("UNACCEPT TIMED OUT • DECLINING", C.RED)
+            decline(operationContext)
+            return
+        elseif not unaccept(myOffer) then
+            setTestStatus("WAIT UNACCEPT • RETRY", C.YELLOW)
+            return
+        end
         if not Runtime.liveContext(operationContext, true, false) then return end
     end
+
     Runtime.observeFirstAccept(trade, myOffer)
     local policy = Runtime.policySignature()
     if State.policySignature ~= policy then
@@ -10348,6 +10503,7 @@ local function manageAutoTrade(trade)
             unaccept(
                 myOffer
             )
+                if not Runtime.liveContext(operationContext, true, false) then return end
 
             if not Runtime.liveContext(operationContext, true, true) or State.unacceptRequired then return end
         end
@@ -10510,6 +10666,7 @@ local function manageAutoTrade(trade)
         )
 
         local added, showcaseReason = showcase(myOffer)
+        if not Runtime.liveContext(operationContext, false, false) then return end
         if added or showcaseReason == "EXHAUSTED" then
             State.showcaseFinished=true State.showcaseStockSignature=Runtime.inventorySignature()
         end
@@ -10532,7 +10689,7 @@ local function manageAutoTrade(trade)
     if Settings.ownPotionsOnly == true and myCount == 0 then
         local available = Runtime.potionWaitingOffer()
         if #available == 0 then
-            Runtime.waitForPotionStock()
+            Runtime.waitForPotionStock(operationContext)
             return
         end
     end
@@ -10550,15 +10707,12 @@ local function manageAutoTrade(trade)
         if not State.waitForFirstAt then State.waitForFirstAt = os.clock() end
 
         if not State.initialAsk then
-
-            State.initialAsk =
-                true
-
-            InventoryFlow.sendQuickChat(partner, 4, "please add +")
-
-            testLog(
-                "ASK FIRST ITEM"
-            )
+            local sent = Runtime.sendAddRequest(partner, operationContext, "initial", "FIRST:" .. tostring(State.theirRevision))
+            if not Runtime.liveContext(operationContext, true, false) then return end
+            if sent then
+                State.initialAsk = true
+                testLog("ASK FIRST ITEM SENT")
+            end
         end
 
         local elapsed =
@@ -10590,7 +10744,7 @@ local function manageAutoTrade(trade)
             and not State.declineSent
         then
 
-            decline()
+            decline(operationContext)
         end
 
         return
@@ -10653,11 +10807,13 @@ local function manageAutoTrade(trade)
             theirOffer
         )
 
+    if not Runtime.liveContext(operationContext, true, true) then return end
     if evaluation.blocked then
 
         unaccept(
             myOffer
         )
+            if not Runtime.liveContext(operationContext, true, false) then return end
 
         -- UNKNOWN gets a dedicated wait window instead of blocking forever.
         -- Any partner add/remove resets this timer through theirSignature.
@@ -10713,7 +10869,7 @@ local function manageAutoTrade(trade)
                     "BLOCK " .. evaluation.reason .. " TIMEOUT -> DECLINE"
                 )
 
-                decline()
+                decline(operationContext)
             end
 
             return
@@ -10941,7 +11097,7 @@ local function manageAutoTrade(trade)
             desired, ourValue = Runtime.potionWaitingOffer()
             if not Runtime.liveContext(operationContext, true, true) then return end
             if #desired == 0 then
-                Runtime.waitForPotionStock()
+                Runtime.waitForPotionStock(operationContext)
                 return
             end
         end
@@ -11063,8 +11219,8 @@ local function manageAutoTrade(trade)
     -- and remained unchanged for PRE ACCEPT DELAY seconds.
     if evaluation.valid then
 
-        State.askStarted =
-            nil
+        State.askStarted, State.askSent = nil, nil
+        if State.chatAskAttempts then State.chatAskAttempts.add = nil end
 
         local finalSignature =
             fullSignature(
@@ -11147,6 +11303,7 @@ local function manageAutoTrade(trade)
             unaccept(
                 myOffer
             )
+                if not Runtime.liveContext(operationContext, true, false) then return end
 
             testLog(
                 "PRE ACCEPT RECHECK FAILED"
@@ -11176,31 +11333,30 @@ local function manageAutoTrade(trade)
     unaccept(
         myOffer
     )
+        if not Runtime.liveContext(operationContext, true, false) then return end
 
     -- ASK ADD: start a fresh inactivity window. If THEIR offer does not
     -- change for the full timeout, decline. A partner add/remove changes
     -- theirSignature and starts a brand-new window after recalculation.
-    if
-        not State.askStarted
-        or State.askSignature
-            ~= theirSignature
-    then
-
-        State.askStarted =
-            os.clock()
-
-        State.askSignature =
-            theirSignature
-
-        InventoryFlow.sendQuickChat(partner, 4, "please add +")
-
-        testLog(
-            "ASK ADD",
-            "INACTIVITY WINDOW=",
-            Settings.addTimeout,
-            "SECONDS • DECLINE IF THEIR OFFER DOES NOT CHANGE"
-        )
+    if State.askSignature ~= theirSignature then
+        State.askStarted, State.askSent, State.askSignature = nil, false, theirSignature
     end
+    if not State.askSent and Settings.chatRequests then
+        local sent, attempt = Runtime.sendAddRequest(partner, operationContext, "add", "ADD:" .. theirSignature)
+        if not Runtime.liveContext(operationContext, true, false) then return end
+        if sent then
+            State.askSent, State.askStarted = true, os.clock()
+            testLog("ASK ADD SENT • INACTIVITY WINDOW=", Settings.addTimeout)
+        elseif not State.askStarted then
+            if attempt and os.clock() - attempt.since >= Settings.addTimeout then decline(operationContext) return end
+            local message = attempt and attempt.uncertain and "ASK RESULT UNKNOWN • NO DUPLICATE"
+                or attempt and attempt.count >= 3 and "ASK CHAT FAILED • WAITING"
+                or "ASK CHAT FAILED • RETRYING"
+            setTestStatus(message, C.YELLOW)
+            return
+        end
+    end
+    State.askStarted = State.askStarted or os.clock()
 
     local elapsed =
         os.clock()
@@ -11225,7 +11381,7 @@ local function manageAutoTrade(trade)
         and not State.declineSent
     then
 
-        decline()
+        decline(operationContext)
     end
 end
 
@@ -11235,6 +11391,12 @@ end
 --============================================================
 
 local function runAutoTrade()
+    if not Runtime.storageReady() then
+        local live = getTrade()
+        if live then Runtime.beginAcceptanceCancellation("Saved data unavailable", Runtime.captureTrade(live)) end
+        setTestStatus("AUTO BLOCKED • RESTORE SAVED SETTINGS / NEW HISTORY", C.RED)
+        return
+    end
     if getTrade() then PlazaRouter.clearSince = nil end
 
     local trade =
@@ -11308,18 +11470,14 @@ local function runAutoTrade()
             .. math.max(
                 0,
                 math.ceil(
-                    Settings.requestTimeout
-                    - elapsed
+                    (State.requestUncertainUntil or (State.requestStarted + Settings.requestTimeout)) - os.clock()
                 )
             )
             .. "s",
             C.YELLOW
         )
 
-        if
-            elapsed
-            >= Settings.requestTimeout
-        then
+        if os.clock() >= (State.requestUncertainUntil or (State.requestStarted + Settings.requestTimeout)) then
 
             cooldown(
                 State.target
@@ -11360,8 +11518,8 @@ local function runAutoTrade()
     State.target =
         target
 
-    State.requestStarted =
-        os.clock()
+    State.requestStarted, State.requestUncertainUntil = nil, nil
+    State.requestSendingAt = os.clock()
 
     setTestStatus(
         "REQUEST -> "
@@ -11374,26 +11532,23 @@ local function runAutoTrade()
         target.Name
     )
 
-    if
-        not sendTrade(
-            target
-        )
-    then
-
-        testLog(
-            "REQUEST FAILED"
-        )
-
-        cooldown(
-            target
-        )
-
-        State.target =
-            nil
-
-        State.requestStarted =
-            nil
+    local sent, reason = sendTrade(target)
+    if not Runtime.alive() or not Settings.autoTrade or AutoTradeGeneration ~= preflightGeneration
+        or State.target ~= target then return end
+    State.requestSendingAt = nil
+    if getTrade() then return end
+    if sent then
+        State.requestStarted = os.clock()
+    elseif reason == "REMOTE TIMEOUT" or reason == "REMOTE BUSY" then
+        State.requestStarted = os.clock()
+        State.requestUncertainUntil = os.clock() + math.max(30, Settings.requestTimeout)
+        testLog("REQUEST RESULT UNKNOWN • WAIT BEFORE NEXT REQUEST")
+    else
+        testLog("REQUEST FAILED")
+        cooldown(target)
+        State.target, State.requestStarted, State.requestUncertainUntil = nil, nil, nil
     end
+
 end
 
 
@@ -11401,10 +11556,19 @@ end
 -- LIVE TRADE DISPLAY
 --============================================================
 
+function Runtime.manualTradeLabel(evaluation)
+    local profit = num(evaluation.profit)
+    if profit == nil then return "WAITING" end
+    local label = math.abs(profit) <= 0.000000001 and "FAIR" or (profit > 0 and "WIN" or "LOSE")
+    if profit > 0 and not evaluation.valid then label ..= " • BELOW TARGET" end
+    return label
+end
+
 local function updateTradeDisplay()
     local trade = getTrade()
     if not trade then
-        TradeStatus.Text, TradeStatus.TextColor3, TradeInfo.Text = "WAITING FOR TRADE", C.MUTED, ""
+        local storage = Runtime.storageNotice()
+        TradeStatus.Text, TradeStatus.TextColor3, TradeInfo.Text = storage and "STORAGE ERROR" or "WAITING FOR TRADE", storage and C.YELLOW or C.MUTED, storage or ""
         return
     end
     local myOffer, theirOffer, _, partner = getTradeSides(trade)
@@ -11412,6 +11576,8 @@ local function updateTradeDisplay()
     local evaluation = evaluateTrade(myOffer, theirOffer)
     local mine, theirs = evaluation.mine, evaluation.theirs
     local lines = {"PARTNER: " .. playerName(partner)}
+    local storage = Runtime.storageNotice()
+    if storage then lines[#lines + 1] = storage end
     if AMVGG.dataStale then
         lines[#lines + 1] = "LAST GOOD PRICES • UPDATE FAILED • AUTO ACCEPT BLOCKED"
     end
@@ -11448,7 +11614,7 @@ local function updateTradeDisplay()
         TradeStatus.Text, TradeStatus.TextColor3 = "WAITING", C.YELLOW
     else
         local label = Settings.autoTrade and (evaluation.valid and "AUTO: VALUE CHECK PASSED" or "AUTO: NEED ADD")
-            or (evaluation.valid and "WIN" or "LOSE")
+            or Runtime.manualTradeLabel(evaluation)
         TradeStatus.Text = string.format("%s • COUNTED PROFIT %+.2f%%", label, evaluation.profit)
         TradeStatus.TextColor3 = evaluation.valid and C.GREEN or C.YELLOW
     end
@@ -11770,69 +11936,58 @@ Runtime.task.spawn(
 -- PERIODIC AMVGG REFRESH
 --============================================================
 
-Runtime.task.spawn(
-    function()
-
-        while Gui.Parent do
-
-            local minutes =
-                math.max(
-                    1,
-                    tonumber(
-                        Settings.refreshMinutes
-                    )
-                    or 5
-                )
-
-            Runtime.task.wait(
-                minutes
-                * 60
-            )
-
-            if not Gui.Parent then
-                break
+function Runtime.waitForPriceRefresh()
+    local fallback = os.clock()
+    while Runtime.alive() and Gui.Parent do
+        local now = os.clock()
+        if AMVGG.loading then
+            if now - (Runtime.priceRefreshStarted or fallback) >= 125 then return true end
+            Runtime.task.wait(1)
+        else
+            local due
+            if AMVGG.dataStale or not AMVGG.ready then
+                due = num(Runtime.priceRetryAt) or (fallback + 30)
+            else
+                local minutes = Runtime.numberValue("refreshMinutes", Settings.refreshMinutes, 1, 1440)
+                due = (num(Runtime.lastRefreshClock) or fallback) + minutes * 60
+                due = math.max(due, num(Runtime.priceRetryAt) or 0)
             end
-
-            local ok,
-                err =
-                pcall(
-                    function()
-
-                        testLog(
-                            "AMVGG REFRESH"
-                        )
-
-                        refresh()
-
-                        updateFirstSeen()
-
-                        Runtime.rebuildSearch()
-                    end
-                )
-
-            if not ok then
-
-                testLog(
-                    "REFRESH ERROR",
-                    err
-                )
-            end
+            local remaining = due - now
+            if remaining <= 0 then return true end
+            Runtime.task.wait(math.min(1, remaining))
         end
     end
-)
+    return false
+end
+
+Runtime.task.spawn(function()
+    while Runtime.alive() and Gui.Parent and Runtime.waitForPriceRefresh() do
+        local ok, err = pcall(function()
+            testLog("AMVGG REFRESH")
+            local refreshed = refresh()
+            updateFirstSeen()
+            Runtime.rebuildSearch()
+            return refreshed
+        end)
+        if not ok or err ~= true then
+            Runtime.priceRetryAt = os.clock() + 30
+            if not ok then testLog("REFRESH ERROR", err) end
+        end
+    end
+end)
 
 
 --============================================================
+
+
 -- PLAYER CLEANUP
 --============================================================
 
 Runtime.connect(Players.PlayerRemoving,
     function(player)
 
-        PlayerCooldowns[
-            player.UserId
-        ] =
-            nil
+        local expires=PlayerCooldowns[player.UserId]
+        if expires and os.clock()>=expires then PlayerCooldowns[player.UserId]=nil end
 
         if
             State.target
