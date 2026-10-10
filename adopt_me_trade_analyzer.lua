@@ -1,3 +1,5 @@
+-- V11.7.48: readable self-contained source with local teleport resume.
+local amSource = [====[
 repeat task.wait() until game:IsLoaded()
 
 --============================================================
@@ -41,7 +43,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.46"
+    "11.7.48"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -120,6 +122,7 @@ do
             end
         end
         table.clear(Runtime.jobs)
+        if Runtime.releaseFileWriters then pcall(Runtime.releaseFileWriters) end
         for _, object in pairs({Runtime.gui, Runtime.boot}) do
             if object then pcall(function() object:Destroy() end) end
         end
@@ -1289,12 +1292,47 @@ local ADOPT_TO_AMVGG = {
 }
 
 
+-- Enrich incomplete trade records without changing the original ClientData.
+-- A verified game ID or one unambiguous ItemDB category is required.
+function Runtime.resolveItem(item)
+    if type(item) ~= "table" then return item end
+    if type(item.category) == "string" and item.category ~= "" then return item end
+    local result = table.clone(item)
+    if item.category ~= nil and item.category ~= "" then
+        result.__amIdentityReason = "INVALID CATEGORY"
+        return result
+    end
+    local kind = item.kind
+    if type(kind) ~= "string" or kind == "" then
+        result.__amIdentityReason = "ITEM ID MISSING"
+        return result
+    end
+    if kind == "pet_riding_potion" or kind == "pet_flying_potion" then
+        result.category = "food"
+        return result
+    end
+    local found
+    for category, bucket in pairs(ItemDB) do
+        if type(category) == "string" and type(bucket) == "table" and bucket[kind] ~= nil then
+            if found and found ~= category then
+                result.__amIdentityReason = "CATEGORY AMBIGUOUS"
+                return result
+            end
+            found = category
+        end
+    end
+    result.category = found
+    result.__amIdentityReason = found == nil and "CATEGORY MISSING" or nil
+    return result
+end
+
 local function getItemDB(item)
 
     if type(item) ~= "table" then
         return nil
     end
 
+    item = Runtime.resolveItem(item)
     local category =
         ItemDB[
             item.category
@@ -1386,11 +1424,20 @@ local function getVariant(item)
         return ""
     end
 
-    local p =
-        type(item.properties) == "table"
-        and item.properties
-        or {}
-
+    -- A missing properties record is not proof of the NP variant. Eggs
+    -- have no pet variants and are exempt only after catalog identification.
+    local p = item.properties
+    if type(p) ~= "table" then
+        if Runtime.variantlessItem and Runtime.variantlessItem(item) then return "NP" end
+        return "UNKNOWN", "PET PROPERTIES MISSING/INVALID"
+    end
+    for _, field in ipairs({"flyable", "rideable", "neon", "mega_neon"}) do
+        if p[field] ~= nil and type(p[field]) ~= "boolean" then
+            return "UNKNOWN", "INVALID PET PROPERTY " .. field
+        end
+    end
+    -- Adopt Me's populated properties tables use sparse boolean flags:
+    -- absent flags mean false; absence of the whole table means unknown.
     local F = p.flyable == true
     local R = p.rideable == true
     local N = p.neon == true
@@ -2249,6 +2296,7 @@ end
 
 
 local function findAMVGG(item)
+    item = Runtime.resolveItem(item)
 
     if type(item) ~= "table" then
         return nil
@@ -2383,6 +2431,11 @@ end
 -- Exact calculator logic restored from the proven V11.6.2 build.
 -- Supports: NP R F FR N NR NF NFR M MR MF MFR.
 --============================================================
+
+function Runtime.variantlessItem(item)
+    local entry, source = findAMVGG(item)
+    return entry ~= nil and source == "eggs"
+end
 
 local MULTIPLIERS = {
 
@@ -2639,6 +2692,9 @@ local MULTIPLIERS = {
     },
 }
 
+-- Category 73 coefficients verified against AMVGG's current calculator.
+MULTIPLIERS[73] = {NP=0.94, R=0.96, F=0.98, NNP=1, NR=1, NF=1, MNP=1.05, MR=1, MF=1}
+
 local EXACT_FIELD = {
     NP = "npRegularValue",
     F = "fValue",
@@ -2699,10 +2755,12 @@ local function getPetValue(entry, variant)
     local category = num(entry.category)
     if category == 13 then return exact(EXACT_FIELD[variant]) end
     if category == nil then return nil, nil, false, "NO CATEGORY" end
-    if not MULTIPLIERS[category] then return nil, nil, false, "NO MULTIPLIER FOR CATEGORY " .. tostring(category) end
+    -- Published FR/NFR/MFR values require no category coefficient. Keep
+    -- them usable when AMVGG adds a category; never guess other variants.
     if variant == "FR" then return exact("regularValue") end
     if variant == "NFR" then return exact("neonValue") end
     if variant == "MFR" then return exact("megaValue") end
+    if not MULTIPLIERS[category] then return nil, nil, false, "NO MULTIPLIER FOR CATEGORY " .. tostring(category) end
     local family = variant:sub(1,1)
     local field = family == "M" and "megaValue" or (family == "N" and variant ~= "NP") and "neonValue" or "regularValue"
     local base = num(entry[field])
@@ -2816,6 +2874,7 @@ do
 end
 
 local function analyzeItem(item)
+    item = Runtime.resolveItem(item)
 
     local result = {
 
@@ -2871,7 +2930,7 @@ local function analyzeItem(item)
     if not entry then
 
         result.reason =
-            "NOT FOUND"
+            (type(item) == "table" and item.__amIdentityReason) or "NOT FOUND"
 
         return result
     end
@@ -2880,6 +2939,11 @@ local function analyzeItem(item)
     result.source =
         source
 
+    if source == "pets" and result.variant == "UNKNOWN" then
+        result.isRealPet = true
+        result.reason = select(2, getVariant(item)) or "PET VARIANT UNKNOWN"
+        return result
+    end
     result.isRealPet, result.rawDemand, result.demandStars =
         DemandPolicy.read(entry, source, result.variant)
 
@@ -3077,7 +3141,7 @@ local Settings = {
     preAcceptDelay =
         4,
 
-    -- After FIRST ACCEPT, always wait this many seconds before SECOND CONFIRM.
+    -- After observing the confirmation stage, wait this long before CONFIRM.
     -- Adopt Me's confirmation transition can take different amounts of time
     -- depending on the amount of units in the trade, so never confirm instantly.
     secondConfirmDelay =
@@ -3252,41 +3316,76 @@ function Runtime.storageNotice()
     return #errors > 0 and ("STORAGE ERROR • " .. table.concat(errors, " | ")) or nil
 end
 
+-- Writer ownership survives coroutine cancellation without a timeout lease.
+-- A live suspended writer keeps its lock; dead writers are reclaimed safely.
+function Runtime.releaseFileWriters()
+    local writers = ENV.__AM_ANALYZER_FILE_WRITERS
+    if type(writers) ~= "table" then return end
+    for path, owner in pairs(writers) do
+        if type(owner) == "table" and owner.runtime == Runtime then
+            local thread = owner.thread
+            if type(thread) == "thread" and thread ~= coroutine.running() and coroutine.status(thread) ~= "dead" then
+                local cancel = Runtime.nativeTask and Runtime.nativeTask.cancel
+                if type(cancel) == "function" then pcall(cancel, thread) end
+            end
+            if type(thread) == "thread" and coroutine.status(thread) == "dead" and writers[path] == owner then
+                writers[path] = nil
+            end
+        end
+    end
+end
+
 local function saveJSON(path, data)
-    -- Serialize writers in this executor, including replacement Runtime objects.
+    if not Runtime.alive() then return false, "STORAGE WRITE CANCELLED" end
     ENV.__AM_ANALYZER_FILE_WRITERS = ENV.__AM_ANALYZER_FILE_WRITERS or {}
     local writers = ENV.__AM_ANALYZER_FILE_WRITERS
-    if writers[path] then return false, "STORAGE WRITE BUSY" end
-    local owner = {}
+    local previousOwner = writers[path]
+    if previousOwner then
+        -- Pre-V48 owners had no thread metadata. The previous analyzer is
+        -- stopped at boot; its legacy orphan cannot represent a V48 writer.
+        local thread = type(previousOwner) == "table" and previousOwner.thread
+        if type(thread) ~= "thread" or coroutine.status(thread) == "dead" then
+            if writers[path] == previousOwner then writers[path] = nil end
+        else
+            return false, "STORAGE WRITE BUSY"
+        end
+    end
+    local owner = {runtime=Runtime, thread=coroutine.running()}
     writers[path] = owner
+    local function checked(call, ...)
+        if not Runtime.alive() or writers[path] ~= owner then error("STORAGE WRITE CANCELLED", 0) end
+        local result = table.pack(call(...))
+        if not Runtime.alive() or writers[path] ~= owner then error("STORAGE WRITE CANCELLED", 0) end
+        return table.unpack(result, 1, result.n)
+    end
     local function save()
-        local _, status = loadJSON(path)
+        local _, status = checked(loadJSON, path)
         if status == "ERROR" then return false, Runtime.storageErrors[path] end
         if not Runtime.savedJSONValid(path, data) then return false, "INVALID SAVE SCHEMA" end
         local previous = Runtime.fileLastGood[path]
-        local initialMain = isfile(path) and readfile(path) or nil
+        local initialMain = checked(isfile, path) and checked(readfile, path) or nil
         if type(writefile) ~= "function" then error("WRITEFILE UNAVAILABLE") end
-        local encoded = HttpService:JSONEncode(data)
+        local encoded = checked(HttpService.JSONEncode, HttpService, data)
         if type(encoded) ~= "string" then error("JSON ENCODING FAILED") end
         local function verify(candidate, wanted)
-            local actual = readfile(candidate)
-            if actual ~= wanted or not Runtime.savedJSONValid(path,HttpService:JSONDecode(actual)) then
+            local actual = checked(readfile, candidate)
+            if actual ~= wanted or not Runtime.savedJSONValid(path,checked(HttpService.JSONDecode,HttpService,actual)) then
                 error("WRITE VERIFICATION FAILED")
             end
         end
         local function mainUnchanged()
-            return (isfile(path) and readfile(path) or nil) == initialMain
+            return (checked(isfile,path) and checked(readfile,path) or nil) == initialMain
         end
-        writefile(path .. ".tmp", encoded)
-        verify(path .. ".tmp", encoded)
+        checked(writefile,path .. ".tmp",encoded)
+        verify(path .. ".tmp",encoded)
         if not mainUnchanged() then return false, "STORAGE WRITE CONFLICT" end
         if previous ~= nil then
-            local backupOK, backup = pcall(readfile,path .. ".bak")
-            if not backupOK or backup ~= previous then writefile(path .. ".bak",previous) end
+            local backupOK, backup = pcall(checked,readfile,path .. ".bak")
+            if not backupOK or backup ~= previous then checked(writefile,path .. ".bak",previous) end
             verify(path .. ".bak",previous)
         end
         if not mainUnchanged() then return false, "STORAGE WRITE CONFLICT" end
-        writefile(path,encoded)
+        checked(writefile,path,encoded)
         verify(path,encoded)
         Runtime.fileLastGood[path] = encoded
         return true
@@ -3294,11 +3393,11 @@ local function saveJSON(path, data)
     local called, ok, err = pcall(save)
     if writers[path] == owner then writers[path] = nil end
     if not called then err,ok=ok,false end
-    -- Never roll main back: a different process may have committed after us.
-    -- Preserve the checked backup/staging for recovery from partial writes.
     local message = not ok and tostring(err or "SAVE FAILED"):sub(1,180) or nil
-    Runtime.storageIssue(path,message,"write")
-    if ok then Runtime.storageIssue(path,nil,"read") end
+    if Runtime.alive() then
+        Runtime.storageIssue(path,message,"write")
+        if ok then Runtime.storageIssue(path,nil,"read") end
+    end
     return ok,message
 end
 
@@ -3515,6 +3614,7 @@ function Runtime.disableAutomation()
         state.chatAskAttempts, state.askSent = nil, nil
         state.optimizedSignature, state.acceptReadySignature, state.acceptReadySince = nil, nil, nil
         state.policySignature, state.optimizedOurSignature, state.confirmPending = nil, nil, nil
+        state.confirmationKey, state.confirmationAt = nil, nil
     end
     if Runtime.requestStopAcceptance then Runtime.requestStopAcceptance() end
 end
@@ -3951,33 +4051,19 @@ end
 
 
 local function getOfferItems(offer)
-
-    if type(offer) ~= "table" then
-        return {}
+    if type(offer) ~= "table" then return {} end
+    local raw = type(offer.items) == "table" and offer.items or offer.offer_items
+    if type(raw) ~= "table" then return {} end
+    local result
+    for key, item in pairs(raw) do
+        local resolved = Runtime.resolveItem(item)
+        if resolved ~= item then
+            if not result then result = table.clone(raw) end
+            result[key] = resolved
+        end
     end
-
-    if
-        type(offer.items)
-        == "table"
-    then
-
-        return
-            offer.items
-    end
-
-    if
-        type(
-            offer.offer_items
-        ) == "table"
-    then
-
-        return
-            offer.offer_items
-    end
-
-    return {}
+    return result or raw
 end
-
 
 local function itemUID(item)
 
@@ -4690,6 +4776,7 @@ function Runtime.invokeRemote(remote, expected, ...)
     end
     local function expectedCurrent()
         if not expected then return true end
+        if expected.idle then return expected.idle() == true end
         if not Settings.autoTrade or expected.context.auto ~= true then return false end
         if expected.prices ~= false and not Runtime.storageReady() then return false end
         local live, _, mine = Runtime.liveContext(expected.context, expected.mine ~= false, expected.prices ~= false)
@@ -4711,6 +4798,7 @@ function Runtime.invokeRemote(remote, expected, ...)
     local function invoke()
         if not expectedCurrent() then operation.done=true operation.result=table.pack(false,"REMOTE CANCELLED") return end
         if expected and expected.acceptRecord then expected.acceptRecord.started=true end
+        if expected and expected.attemptRecord then expected.attemptRecord.started=true end
         local result = table.pack(pcall(function()
             if typeof(remote) == "Instance" then
                 if remote:IsA("RemoteEvent") then
@@ -4862,14 +4950,15 @@ end
 
 
 function Runtime.yieldInventoryWork(index, context, prices, generation)
-    if index % 64 ~= 0 then return true end
+    if index % 256 ~= 0 then return true end
     Runtime.task.wait()
     return Runtime.alive() and prices == AMVGG.version and generation == AutoTradeGeneration
         and (not context or Runtime.liveContext(context, true, true) ~= nil)
 end
 
 local function inventoryItems()
-    local operation = getTrade() and Runtime.captureTrade(getTrade())
+    local currentTrade = getTrade()
+    local operation = currentTrade and Runtime.captureTrade(currentTrade)
     local prices, generation, scanned = AMVGG.version, AutoTradeGeneration, 0
 
     local inventory =
@@ -5008,12 +5097,29 @@ function Runtime.ownProofCurrent(proof, mine)
     return count == total
 end
 
-function Runtime.inventorySignature()
+function Runtime.inventorySignature(force)
+    local inventory = getInventory()
+    if type(inventory) ~= "table" then
+        Runtime.inventorySignatureAt, Runtime.inventorySignatureValue = nil, nil
+        return "INVENTORY_UNAVAILABLE"
+    end
+    local now, generation, prices = os.clock(), AutoTradeGeneration, AMVGG.version
+    if not force and Runtime.inventorySignatureValue and Runtime.inventorySignatureAt
+        and Runtime.inventorySignatureTable == inventory
+        and Runtime.inventorySignatureGeneration == generation and Runtime.inventorySignaturePrices == prices
+        and now >= Runtime.inventorySignatureAt and now - Runtime.inventorySignatureAt < 2 then
+        return Runtime.inventorySignatureValue
+    end
     local signatures = {}
     for _, item in ipairs(inventoryItems()) do
         signatures[#signatures + 1] = Runtime.itemValuationSignature(item)
     end
+    if generation ~= AutoTradeGeneration or prices ~= AMVGG.version or not Runtime.alive() then
+        Runtime.inventorySignatureAt = nil
+        return "INVENTORY_SCAN_CANCELLED"
+    end
     table.sort(signatures)
+    Runtime.inventorySignatureTable, Runtime.inventorySignatureGeneration, Runtime.inventorySignaturePrices = inventory, generation, prices
     Runtime.inventorySignatureAt, Runtime.inventorySignatureValue = os.clock(), table.concat(signatures, "|")
     return Runtime.inventorySignatureValue
 end
@@ -8662,10 +8768,73 @@ local function plazaTradeClear()
     return os.clock() - PlazaRouter.clearSince >= 8
 end
 
+-- A local copy is queued once and reused on the destination server. No network
+-- loader, guessed URL or external auto-execute setting is required.
+function Runtime.prepareTeleportResume()
+    local source = ENV.__AM_ANALYZER_RESTART_SOURCE
+    local queue = queue_on_teleport or queueonteleport
+    if type(queue) ~= "function" and type(syn) == "table" then queue = syn.queue_on_teleport end
+    if type(queue) ~= "function" and type(fluxus) == "table" then queue = fluxus.queue_on_teleport end
+    if type(source) ~= "string" or source == "" or type(queue) ~= "function"
+        or type(readfile) ~= "function" or type(writefile) ~= "function" or type(loadstring) ~= "function" then
+        return false, "QUEUE / LOCAL FILE API UNAVAILABLE"
+    end
+    local id = tostring(LocalPlayer.UserId)
+    local scriptFile, flagFile = "am_analyzer_resume_" .. id .. ".lua", "am_analyzer_resume_" .. id .. ".flag"
+    local ok, err = pcall(function()
+        writefile(scriptFile, source)
+        if readfile(scriptFile) ~= source then error("RESUME SCRIPT NOT VERIFIED") end
+        writefile(flagFile, "RUN")
+        if readfile(flagFile) ~= "RUN" then error("RESUME FLAG NOT VERIFIED") end
+    end)
+    if not ok then return false, tostring(err) end
+    if not Runtime.resumeCleanup then
+        Runtime.resumeCleanup = true
+        Runtime.cleanups[#Runtime.cleanups + 1] = function() pcall(writefile, flagFile, "STOP") end
+    end
+    if Runtime.resumeQueued then return true end
+    local payload = string.format([=[
+repeat task.wait() until game:IsLoaded()
+local env = type(getgenv) == "function" and getgenv() or _G
+local bootKey = tostring(game.JobId) .. ":" .. tostring(game.PlaceId)
+if env.__AM_ANALYZER_TELEPORT_BOOT == bootKey then return end
+if tostring(game:GetService("Players").LocalPlayer.UserId) ~= %q then return end
+local ok, source = pcall(function()
+    if readfile(%q) ~= "RUN" then return nil end
+    return readfile(%q)
+end)
+if not ok or type(source) ~= "string" or source == "" then return end
+local fn, err = loadstring(source)
+if not fn then warn("AM AUTO-RESUME: " .. tostring(err)) return end
+env.__AM_ANALYZER_TELEPORT_BOOT = bootKey
+env.__AM_ANALYZER_RESTART_SOURCE = source
+local started, failure = pcall(fn)
+if not started and env.__AM_ANALYZER_TELEPORT_BOOT == bootKey then env.__AM_ANALYZER_TELEPORT_BOOT = nil warn("AM AUTO-RESUME: " .. tostring(failure)) end
+]=], id, flagFile, scriptFile)
+    ok, err = pcall(queue, payload)
+    if not ok then return false, tostring(err) end
+    Runtime.resumeQueued = true
+    return true
+end
+
 local function teleportToPlazaTarget(placeId, serverId)
     local target = {PlaceId = placeId, JobId = serverId}
     -- This is the final guard after HTTP and reservation work. No yield is
     -- permitted between this check and initiating the teleport.
+    if not Runtime.alive() or not Gui.Parent or not Runtime.configurationReady() or not Settings.plazaAutoRoute
+        or PlazaRouter.teleporting or not plazaTradeClear() then
+        releasePlazaReservation(target)
+        return false
+    end
+    local resumeOK, resumeError = Runtime.prepareTeleportResume()
+    if not resumeOK then
+        releasePlazaReservation(target)
+        PlazaRouter.preparing, PlazaRouter.readyForTrading = false, true
+        PlazaRouter.retryAt = os.clock() + 60
+        plazaLog("TELEPORT BLOCKED • AUTO-RESUME UNAVAILABLE", resumeError)
+        return false
+    end
+    -- File and queue APIs may yield, so repeat the final live guard afterward.
     if not Runtime.alive() or not Gui.Parent or not Runtime.configurationReady() or not Settings.plazaAutoRoute
         or PlazaRouter.teleporting or not plazaTradeClear() then
         releasePlazaReservation(target)
@@ -9146,6 +9315,7 @@ local function resetState()
     State.requestSendingAt, State.requestUncertainUntil = nil, nil
     State.chatAskAttempts, State.askSent = nil, nil
     State.firstAcceptObserved, State.firstAcceptSentAt, State.emptyTheirSince = nil, nil, nil
+    State.confirmationKey, State.confirmationAt = nil, nil
     InventoryFlow.stop("trade state reset")
     State.unacceptRequired, State.declineRequested, State.policySignature = nil, nil, nil
     State.optimizedOurSignature, State.confirmPending, State.showcasePending, State.showcaseAttemptAt, State.waitForFirstAt = nil, nil, nil, nil, nil
@@ -9307,11 +9477,12 @@ local function sendTrade(player)
     local function allowed()
         return Runtime.alive() and Settings.autoTrade and generation == AutoTradeGeneration
             and not PlazaRouter.preparing and not PlazaRouter.teleporting and player and player.UserId == id
+            and select(2, getTrade()) == "ABSENT"
     end
     if not allowed() or not TradeRemote.SendRequest or getTrade() then return false end
     for _, argument in ipairs({player, player.Name, player.UserId}) do
         if not allowed() or getTrade() then return false end
-        local ok, result = remoteCall(TradeRemote.SendRequest, argument)
+        local ok, result = Runtime.invokeRemote(TradeRemote.SendRequest, {idle=allowed}, argument)
         if not allowed() then return false end
         if ok and result ~= false then return true, "SENT" end
         if not ok then
@@ -9364,12 +9535,22 @@ end
 
 
 function Runtime.clearAcceptState()
+    State.confirmationKey, State.confirmationAt = nil, nil
     State.acceptedSignature, State.firstAcceptAt, State.firstAcceptSignature = nil, nil, nil
     State.confirmWaitLoggedSignature, State.confirmPending = nil, nil
     State.firstAcceptObserved, State.firstAcceptSentAt = nil, nil
 end
 
 function Runtime.observeFirstAccept(trade, mine)
+    if Runtime.tradeInConfirmation(trade) then
+        local key = Runtime.tradeKey(trade, select(4, getTradeSides(trade)))
+        if State.confirmationKey ~= key or not State.confirmationAt then
+            State.confirmationKey, State.confirmationAt = key, os.clock()
+            State.confirmPending = nil
+        end
+    else
+        State.confirmationKey, State.confirmationAt, State.confirmPending = nil, nil, nil
+    end
     local signature = fullSignature(mine, select(2, getTradeSides(trade)))
     if accepted(mine) or Runtime.tradeInConfirmation(trade) then
         if State.firstAcceptSignature and State.firstAcceptSignature ~= signature
@@ -9876,9 +10057,9 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
             State.firstAcceptAt, State.confirmWaitLoggedSignature = os.clock(), nil
         end
         local requiredDelay = math.max(0, tonumber(Settings.secondConfirmDelay) or 10)
-        local remaining = requiredDelay - (os.clock() - State.firstAcceptAt)
+        local remaining = requiredDelay - (os.clock() - (State.confirmationAt or os.clock()))
         if remaining > 0 then
-            setTestStatus(string.format("1ST ACCEPTED • 2ND CONFIRM IN %.1fs", remaining), C.YELLOW)
+            setTestStatus(string.format("SECOND STAGE • CONFIRM IN %.1fs", remaining), C.YELLOW)
             return true
         end
         live, _, mine, theirs = Runtime.liveContext(context, true, true)
@@ -9908,7 +10089,7 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
                 decline(context)
                 return false
             end
-            if pending.acknowledged or os.clock() - pending.lastAttempt < 2 then
+            if (pending.attempts or 0) >= 3 or os.clock() - pending.lastAttempt < 2 then
                 setTestStatus("CONFIRM SENT • WAIT LIVE RESULT", C.YELLOW)
                 return true
             end
@@ -9916,12 +10097,14 @@ local function secureAccept(trade, myOffer, theirOffer, expectedContext)
         if not TradeRemote.Confirm then return false end
         if not pending then pending = {key=context.key, signature=signature, since=os.clock()} State.confirmPending = pending end
         pending.lastAttempt = os.clock()
-        local ok, result = Runtime.invokeRemote(TradeRemote.Confirm, {context=context, proof=proof, confirmation=true})
+        local attempt = {}
+        local ok, result = Runtime.invokeRemote(TradeRemote.Confirm, {context=context, proof=proof, confirmation=true, attemptRecord=attempt})
+        if attempt.started then pending.attempts = (pending.attempts or 0) + 1 end
         if not Runtime.liveContext(context, true, true) then return false end
         if not ok or result == false then testLog("CONFIRM FAILED") return false end
         if State.confirmPending ~= pending then return false end
         pending.acknowledged = true
-        testLog("SECOND CONFIRM SENT AFTER", requiredDelay, "SECONDS")
+        testLog("SECOND CONFIRM SENT AFTER STAGE DELAY", requiredDelay, "SECONDS • ATTEMPT", pending.attempts or 0)
         return true
     end
 
@@ -11216,8 +11399,11 @@ local function runAutoTrade()
     end
     if getTrade() then PlazaRouter.clearSince = nil end
 
-    local trade =
-        getTrade()
+    local trade, readStatus = getTrade()
+    if readStatus == "ERROR" then
+        setTestStatus("TRADE READ ERROR • WAITING FOR LIVE DATA", C.YELLOW)
+        return
+    end
 
     if trade then
 
@@ -11252,10 +11438,12 @@ local function runAutoTrade()
             1.25
         )
 
+        if select(2, getTrade()) ~= "ABSENT" then return end
         scanInventoryAndLog(
             "POST TRADE SCAN"
         )
-
+        if select(2, getTrade()) ~= "ABSENT" then return end
+        Runtime.inventorySignatureAt = nil
         resetState()
 
         -- Do not instantly send another request in the same cycle.
@@ -11313,7 +11501,7 @@ local function runAutoTrade()
     local preflightGeneration=AutoTradeGeneration
     if AMVGG.loading or AMVGG.dataStale or not AMVGG.ready then setTestStatus("WAIT AMVGG",C.YELLOW) return end
     local available=valuedInventory()
-    if not Settings.autoTrade or preflightGeneration~=AutoTradeGeneration or not Runtime.alive() or getTrade() then return end
+    if not Settings.autoTrade or preflightGeneration~=AutoTradeGeneration or not Runtime.alive() or select(2, getTrade()) ~= "ABSENT" then return end
     if #available==0 then
         setTestStatus("NO SAFE ITEMS • NO REQUEST",C.YELLOW)
         return
@@ -11382,7 +11570,11 @@ function Runtime.manualTradeLabel(evaluation)
 end
 
 local function updateTradeDisplay()
-    local trade = getTrade()
+    local trade, status = getTrade()
+    if status == "ERROR" then
+        TradeStatus.Text, TradeStatus.TextColor3 = "TRADE READ ERROR • WAITING", C.YELLOW
+        return
+    end
     if not trade then
         local storage = Runtime.storageNotice()
         TradeStatus.Text, TradeStatus.TextColor3, TradeInfo.Text = storage and "STORAGE ERROR" or "WAITING FOR TRADE", storage and C.YELLOW or C.MUTED, storage or ""
@@ -11404,6 +11596,11 @@ local function updateTradeDisplay()
         for index, row in ipairs(result.items) do
             local data, notes = row.data, {}
             local value = data.known and valueText(data.value) or "UNKNOWN"
+            if not data.known then
+                local raw = type(row.raw) == "table" and row.raw or {}
+                notes[#notes + 1] = tostring(data.reason or "UNKNOWN")
+                    .. " • " .. tostring(raw.category or "NO CATEGORY") .. "/" .. tostring(raw.kind or "NO ID")
+            end
             if data.estimated then value = "~" .. value end
             if data.newIgnored then notes[#notes + 1] = "NEW ITEM • NOT COUNTED" end
             if row.ignoredByMin then notes[#notes + 1] = "BELOW MIN • NOT COUNTED" end
@@ -11866,3 +12063,10 @@ Runtime.task.delay(
     end
 )
 Runtime.initializingThread = nil
+
+]====]
+local amEnv = type(getgenv) == "function" and getgenv() or _G
+amEnv.__AM_ANALYZER_RESTART_SOURCE = amSource
+local amRun, amError = loadstring(amSource)
+if not amRun then error("AM compile: " .. tostring(amError)) end
+return amRun()
