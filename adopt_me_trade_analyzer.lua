@@ -1,4 +1,4 @@
--- V11.7.48: readable self-contained source with local teleport resume.
+-- V11.7.49: readable self-contained source with local teleport resume.
 local amSource = [====[
 repeat task.wait() until game:IsLoaded()
 
@@ -43,7 +43,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.48"
+    "11.7.49"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -104,6 +104,7 @@ do
         if not Runtime.active then return end
         if Runtime.beginAcceptanceCancellation then pcall(Runtime.beginAcceptanceCancellation, reason or "stopped") end
         Runtime.active = false
+        Runtime.stopping = true
         local initializing = Runtime.initializingThread
         Runtime.initializingThread = nil
         if type(initializing) == "thread" and initializing ~= coroutine.running() and coroutine.status(initializing) ~= "dead" then
@@ -114,8 +115,6 @@ do
             pcall(function() connection:Disconnect() end)
         end
         table.clear(Runtime.connections)
-        for _, cleanup in ipairs(Runtime.cleanups) do pcall(cleanup) end
-        table.clear(Runtime.cleanups)
         for thread in pairs(Runtime.jobs) do
             if thread ~= coroutine.running() and coroutine.status(thread) ~= "dead" then
                 pcall(nativeTask.cancel, thread)
@@ -123,6 +122,13 @@ do
         end
         table.clear(Runtime.jobs)
         if Runtime.releaseFileWriters then pcall(Runtime.releaseFileWriters) end
+        -- Only this shutdown coroutine may commit final settings/history.
+        -- Automation remains inactive and other writers remain cancelled.
+        Runtime.shutdownWriter = coroutine.running()
+        if Runtime.flushSettings then pcall(Runtime.flushSettings) end
+        for _, cleanup in ipairs(Runtime.cleanups) do pcall(cleanup) end
+        table.clear(Runtime.cleanups)
+        Runtime.shutdownWriter, Runtime.stopping = nil, false
         for _, object in pairs({Runtime.gui, Runtime.boot}) do
             if object then pcall(function() object:Destroy() end) end
         end
@@ -1607,7 +1613,7 @@ do
         ["cracked egg"]=true, ["basic egg"]=true, ["pet egg"]=true, ["fairytale egg"]=true,
         ["endangered egg"]=true, ["retired egg"]=true, ["throwback egg"]=true, ["royal egg"]=true,
         ["aztec egg"]=true, ["admin abuse egg"]=true, ["crystal egg"]=true, ["moon egg"]=true,
-        ["garden egg"]=true, ["royal fairytale egg"]=true,
+        ["garden egg"]=true,
     }
 
     -- Match the same normalized names used by the filter lookups.
@@ -2862,6 +2868,7 @@ do
     end
 
     function DemandPolicy.credit(rawValue, analysis, itemMinimumWinPercent)
+        if analysis and analysis.royalFairytaleEgg then return rawValue / 1.15, "ITEM" end
         if analysis and analysis.isRealPet then
             local stars = analysis.demandStars
             if stars == 3 then return rawValue / 1.0985, "3STAR" end
@@ -2935,6 +2942,7 @@ local function analyzeItem(item)
         return result
     end
 
+    result.royalFairytaleEgg = source == "eggs" and normalize(entry.name) == normalize("Royal Fairytale Egg")
     result.entry = entry
     result.source =
         source
@@ -3253,11 +3261,15 @@ function Runtime.readSavedJSON(path)
     end
     -- Recover the first verified history even if committing main failed.
     -- A stage is never preferred to an existing trusted committed history.
-    if path == FIRST_SEEN_FILE then
+    if path == FIRST_SEEN_FILE or path == SETTINGS_FILE then
         local stageOK, stage, stageStatus, stageText = pcall(read, path .. ".tmp")
-        if stageOK and stageStatus == "READ" and stage.initialized == true then
+        if stageOK and stageStatus == "READ" and (path == SETTINGS_FILE or stage.initialized == true) then
+            if path == SETTINGS_FILE then
+                stage = table.clone(stage)
+                stage.autoTrade = false -- An interrupted first commit cannot restart trading.
+            end
             Runtime.fileLastGood[path], Runtime.fileReadBlocked[path] = stageText, nil
-            Runtime.storageIssue(path, "RECOVERED HISTORY STAGING; MAIN FILE NEEDS REPAIR", "read")
+            Runtime.storageIssue(path, path == SETTINGS_FILE and "RECOVERED SETTINGS STAGING; AUTO TRADE OFF; MAIN FILE NEEDS REPAIR" or "RECOVERED HISTORY STAGING; MAIN FILE NEEDS REPAIR", "read")
             return stage, "READ", "STAGING"
         end
         if not stageOK or stageStatus ~= "MISSING" then ok, data, status = false, stage, "ERROR" end
@@ -3335,8 +3347,13 @@ function Runtime.releaseFileWriters()
     end
 end
 
+function Runtime.fileWriteAllowed()
+    return Runtime.alive() or (Runtime.stopping == true
+        and Runtime.shutdownWriter == coroutine.running() and ENV.__AM_ANALYZER_RUNTIME == Runtime)
+end
+
 local function saveJSON(path, data)
-    if not Runtime.alive() then return false, "STORAGE WRITE CANCELLED" end
+    if not Runtime.fileWriteAllowed() then return false, "STORAGE WRITE CANCELLED" end
     ENV.__AM_ANALYZER_FILE_WRITERS = ENV.__AM_ANALYZER_FILE_WRITERS or {}
     local writers = ENV.__AM_ANALYZER_FILE_WRITERS
     local previousOwner = writers[path]
@@ -3353,9 +3370,9 @@ local function saveJSON(path, data)
     local owner = {runtime=Runtime, thread=coroutine.running()}
     writers[path] = owner
     local function checked(call, ...)
-        if not Runtime.alive() or writers[path] ~= owner then error("STORAGE WRITE CANCELLED", 0) end
+        if not Runtime.fileWriteAllowed() or writers[path] ~= owner then error("STORAGE WRITE CANCELLED", 0) end
         local result = table.pack(call(...))
-        if not Runtime.alive() or writers[path] ~= owner then error("STORAGE WRITE CANCELLED", 0) end
+        if not Runtime.fileWriteAllowed() or writers[path] ~= owner then error("STORAGE WRITE CANCELLED", 0) end
         return table.unpack(result, 1, result.n)
     end
     local function save()
@@ -3401,6 +3418,13 @@ local function saveJSON(path, data)
     return ok,message
 end
 
+function Runtime.pendingSettings()
+    local queue = ENV.__AM_ANALYZER_SETTINGS_PENDING
+    local pending = type(queue) == "table" and queue[tostring(LocalPlayer.UserId)]
+    if type(pending) == "table" and Runtime.savedJSONValid(SETTINGS_FILE, pending.data) then return pending end
+    return nil
+end
+
 function Runtime.applySavedSettings(saved, preserveLocal)
     if type(saved) ~= "table" then return end
     for key,value in pairs(saved) do
@@ -3426,6 +3450,11 @@ do
     Runtime.settingsNeedMigration = origin == "LEGACY"
     Runtime.settingsReadFailed = status == "ERROR"
     Runtime.applySavedSettings(saved)
+    local pending = Runtime.pendingSettings()
+    if pending then
+        Runtime.applySavedSettings(pending.data)
+        Runtime.settingsLocalOverrides = shallowCopy(pending.data)
+    end
 end
 
 function Runtime.normalizeSettings()
@@ -3540,6 +3569,10 @@ local AutoTradeGeneration = 0
 local Gui
 
 function Runtime.incomingItemIgnoreReason(item, options)
+    if normalize(getItemName(item)) == normalize("Royal Fairytale Egg") then
+        local entry, source = findAMVGG(item)
+        if entry and source == "eggs" then return nil end
+    end
     if (not options or options.ignoreIncomingEggs == true) and CommonPetFilter.isIgnoredIncomingEgg(item) then
         return "IGNORED EGG"
     end
@@ -3579,13 +3612,47 @@ local function activeMinItemValue(side)
 end
 
 
-local function saveSettings()
+function Runtime.scheduleSettingsRetry()
+    if not Runtime.alive() or Runtime.settingsRetryScheduled or not Runtime.pendingSettings() then return end
+    if type(Runtime.task.delay) ~= "function" then return end
+    Runtime.settingsRetryScheduled = true
+    Runtime.task.delay(1, function()
+        Runtime.settingsRetryScheduled = nil
+        if Runtime.alive() and Runtime.pendingSettings() then Runtime.flushSettings() end
+    end)
+end
 
-    Runtime.captureSettingsEdits()
-    local ok, err = saveJSON(SETTINGS_FILE, Settings)
-    if ok then Runtime.settingsBaseline() end
+function Runtime.flushSettings()
+    if not Runtime.fileWriteAllowed() then return false, "STORAGE WRITE CANCELLED" end
+    local writer = Runtime.settingsWriter
+    if type(writer) == "thread" and coroutine.status(writer) ~= "dead" then return false, "SETTINGS SAVE QUEUED" end
+    Runtime.settingsWriter = coroutine.running()
+    local queue = ENV.__AM_ANALYZER_SETTINGS_PENDING
+    local account = tostring(LocalPlayer.UserId)
+    local ok, err = true, nil
+    while Runtime.fileWriteAllowed() do
+        local pending = Runtime.pendingSettings()
+        if not pending then break end
+        ok, err = saveJSON(SETTINGS_FILE, pending.data)
+        if not ok then break end
+        Runtime.settingsObserved = shallowCopy(pending.data)
+        if queue[account] == pending then queue[account] = nil end
+        -- A newer snapshot queued during a yielding write is committed next.
+    end
+    Runtime.settingsWriter = nil
+    if Runtime.pendingSettings() then Runtime.scheduleSettingsRetry() end
     return ok, err
 end
+
+local function saveSettings()
+    Runtime.captureSettingsEdits()
+    ENV.__AM_ANALYZER_SETTINGS_PENDING = ENV.__AM_ANALYZER_SETTINGS_PENDING or {}
+    ENV.__AM_ANALYZER_SETTINGS_PENDING[tostring(LocalPlayer.UserId)] = {data=shallowCopy(Settings)}
+    local ok, err = Runtime.flushSettings()
+    if not ok then Runtime.scheduleSettingsRetry() end
+    return ok, err
+end
+
 if Runtime.settingsNeedMigration and not Runtime.settingsReadFailed then saveSettings() end
 
 
@@ -3602,6 +3669,14 @@ function Runtime.policySignature()
     local values = {}
     for _, key in ipairs(keys) do values[#values + 1] = key .. "=" .. tostring(Settings[key]) end
     return table.concat(values, "|")
+end
+
+function Runtime.requestRiskActive()
+    local pending = ENV.__AM_ANALYZER_REQUEST_RISK
+    if type(pending) ~= "table" or pending.account ~= LocalPlayer.UserId then return nil end
+    if num(pending.expires) and os.clock() < pending.expires then return pending end
+    if ENV.__AM_ANALYZER_REQUEST_RISK == pending then ENV.__AM_ANALYZER_REQUEST_RISK = nil end
+    return nil
 end
 
 function Runtime.disableAutomation()
@@ -4775,6 +4850,8 @@ function Runtime.invokeRemote(remote, expected, ...)
         return false, "REMOTE ENDPOINT UNAVAILABLE"
     end
     local function expectedCurrent()
+        if Runtime.acceptanceInFlight and (remote==rawget(TradeRemote,"Add") or remote==rawget(TradeRemote,"Remove"))
+            and Runtime.acceptanceInFlight(getTrade()) then return false end
         if not expected then return true end
         if expected.idle then return expected.idle() == true end
         if not Settings.autoTrade or expected.context.auto ~= true then return false end
@@ -5691,6 +5768,7 @@ local function rebuildOurOffer(myOffer, desired, expectedTheirSignature)
             or stage:find("confirm", 1, true) then
             return "TRADE_CONFIRMING"
         end
+        if Runtime.acceptanceInFlight and Runtime.acceptanceInFlight(live) then return "ACCEPT NOT CANCELLED" end
         if mine.negotiated == true or mine.accepted == true or mine.is_accepted == true then return "OUR_OFFER_ACCEPTED" end
         if expectedTheirSignature ~= nil and offerSignature(theirs) ~= expectedTheirSignature then
             return "THEIR_CHANGED"
@@ -8760,7 +8838,7 @@ local function plazaTradeClear()
         and (state.requestSendingAt ~= nil or (state.requestStarted ~= nil
             and os.clock() < (state.requestUncertainUntil or (state.requestStarted + Settings.requestTimeout))))
     local live,status=getTrade()
-    if status=="ERROR" or live or pendingRequest then
+    if status=="ERROR" or live or pendingRequest or Runtime.requestRiskActive() then
         PlazaRouter.clearSince = nil
         return false
     end
@@ -8771,6 +8849,10 @@ end
 -- A local copy is queued once and reused on the destination server. No network
 -- loader, guessed URL or external auto-execute setting is required.
 function Runtime.prepareTeleportResume()
+    if Runtime.pendingSettings() then
+        local saved, why = Runtime.flushSettings()
+        if not saved or Runtime.pendingSettings() then return false, "SETTINGS NOT YET SAVED: " .. tostring(why) end
+    end
     local source = ENV.__AM_ANALYZER_RESTART_SOURCE
     local queue = queue_on_teleport or queueonteleport
     if type(queue) ~= "function" and type(syn) == "table" then queue = syn.queue_on_teleport end
@@ -9472,6 +9554,7 @@ end
 --============================================================
 
 local function sendTrade(player)
+    if Runtime.requestRiskActive() then return false, "REQUEST RESULT PENDING" end
     local generation = AutoTradeGeneration
     local id = player and player.UserId
     local function allowed()
@@ -9482,8 +9565,13 @@ local function sendTrade(player)
     if not allowed() or not TradeRemote.SendRequest or getTrade() then return false end
     for _, argument in ipairs({player, player.Name, player.UserId}) do
         if not allowed() or getTrade() then return false end
-        local ok, result = Runtime.invokeRemote(TradeRemote.SendRequest, {idle=allowed}, argument)
-        if not allowed() then return false end
+        local attempt = {}
+        local ok, result = Runtime.invokeRemote(TradeRemote.SendRequest, {idle=allowed, attemptRecord=attempt}, argument)
+        if not ok and (attempt.started or result == "REMOTE BUSY") then
+            ENV.__AM_ANALYZER_REQUEST_RISK = {account=LocalPlayer.UserId,
+                expires=os.clock()+math.max(30, num(Settings.requestTimeout) or 30), target=id}
+        end
+        if not allowed() then return false, Runtime.requestRiskActive() and "REQUEST RESULT PENDING" or result end
         if ok and result ~= false then return true, "SENT" end
         if not ok then
             if result == "REMOTE TIMEOUT" or result == "REMOTE CANCELLED" or result == "REMOTE BUSY"
@@ -9495,7 +9583,7 @@ local function sendTrade(player)
 end
 
 
---============================================================
+
 -- ACCEPT FLAGS
 --============================================================
 
@@ -9570,12 +9658,29 @@ function Runtime.observeFirstAccept(trade, mine)
 end
 
 
+function Runtime.acceptanceInFlight(trade)
+    local mine, _, _, partner = getTradeSides(trade)
+    local key = Runtime.tradeKey(trade, partner)
+    if not mine or not key then return false end
+    local request = Runtime.acceptPending
+    if request and request.key == key and request.started and not request.observed then return true end
+    local pending = State.unacceptRequired
+    if pending and pending.key == key then return true end
+    return ENV.__AM_ANALYZER_CANCELLATION and ENV.__AM_ANALYZER_CANCELLATION.key == key or false
+end
+
 local function unaccept(myOffer)
     local live = getTrade()
     local mine, _, _, partner = getTradeSides(live)
     if not mine or (State.tradeID and tostring(live.trade_id or live.id or playerName(partner)) ~= State.tradeID) then return false end
     if offerSignature(mine) ~= offerSignature(myOffer) then return false end
     local key = Runtime.tradeKey(live, partner)
+    local request = Runtime.acceptPending
+    if request and request.key == key and request.started and not request.observed then
+        State.unacceptRequired = State.unacceptRequired or {key=key,since=os.clock()}
+        Runtime.beginAcceptanceCancellation("Accept not yet observed", Runtime.captureTrade(live))
+        return false
+    end
     if not accepted(mine) and not Runtime.tradeInConfirmation(live) then
         State.unacceptRequired = nil
         Runtime.clearAcceptState()
@@ -9660,6 +9765,11 @@ function Runtime.beginAcceptanceCancellation(reason, expectedContext)
     local function finish()
         if ENV.__AM_ANALYZER_CANCELLATION == pending then ENV.__AM_ANALYZER_CANCELLATION=nil end
         if Runtime.stopAcceptance == pending then Runtime.stopAcceptance=nil end
+        if Runtime.acceptPending and Runtime.acceptPending.key == pending.key then Runtime.acceptPending=nil end
+        if State.unacceptRequired and State.unacceptRequired.key == pending.key then
+            State.unacceptRequired=nil
+            Runtime.clearAcceptState()
+        end
     end
     local function issue(operation)
         local remote = Runtime.resolveTradeRemote(operation)
@@ -9693,7 +9803,7 @@ function Runtime.beginAcceptanceCancellation(reason, expectedContext)
         local isAccepted = accepted(own) or Runtime.tradeInConfirmation(trade)
         if not pending.mustClose and not isAccepted and os.clock() >= pending.riskUntil then finish() return end
         if os.clock()-pending.since >= 12 then issue("Decline")
-        elseif isAccepted then issue("Unaccept") end
+        elseif isAccepted or pending.mustClose then issue("Unaccept") end
         trade, own, status = current()
         if status=="ERROR" then return end
         if not trade or (not pending.mustClose and not accepted(own) and not Runtime.tradeInConfirmation(trade) and os.clock()>=pending.riskUntil) then finish() end
@@ -11406,6 +11516,11 @@ local function runAutoTrade()
     end
 
     if trade then
+        local risk = ENV.__AM_ANALYZER_REQUEST_RISK
+        if type(risk) == "table" and risk.account == LocalPlayer.UserId
+            and Runtime.playerID(select(4,getTradeSides(trade))) == risk.target then
+            ENV.__AM_ANALYZER_REQUEST_RISK = nil
+        end
 
         State.requestStarted =
             nil
@@ -11447,6 +11562,12 @@ local function runAutoTrade()
         resetState()
 
         -- Do not instantly send another request in the same cycle.
+        return
+    end
+
+    local requestRisk = Runtime.requestRiskActive()
+    if requestRisk then
+        setTestStatus("REQUEST RESULT UNKNOWN • WAIT " .. math.ceil(requestRisk.expires-os.clock()) .. "s", C.YELLOW)
         return
     end
 
@@ -11544,7 +11665,8 @@ local function runAutoTrade()
     if getTrade() then return end
     if sent then
         State.requestStarted = os.clock()
-    elseif reason == "REMOTE TIMEOUT" or reason == "REMOTE BUSY" then
+    elseif reason == "REMOTE TIMEOUT" or reason == "REMOTE BUSY" or reason == "REQUEST RESULT PENDING"
+        or (type(reason)=="string" and reason:find("REMOTE UNCERTAIN:",1,true)==1) then
         State.requestStarted = os.clock()
         State.requestUncertainUntil = os.clock() + math.max(30, Settings.requestTimeout)
         testLog("REQUEST RESULT UNKNOWN • WAIT BEFORE NEXT REQUEST")
