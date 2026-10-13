@@ -1,4 +1,4 @@
--- V11.7.51: readable self-contained source with local teleport resume.
+-- V11.7.55: per-catalog history, consistent incoming aliases, counted price dependencies.
 local amSource = [====[
 repeat task.wait() until game:IsLoaded()
 
@@ -43,7 +43,7 @@ local ENV =
 --============================================================
 
 local VERSION =
-    "11.7.51"
+    "11.7.55"
 
 local GUI_NAME =
     "AdoptMeTradeAnalyzerV11720"
@@ -1544,14 +1544,12 @@ end
 --============================================================
 -- PET TRADE FILTER
 --============================================================
--- Incoming-side rules:
---   1) ANY plain Neon/Mega (variant N or M) without Fly/Ride is ignored.
---   2) Plain NP pets from Common rarity OR the custom junk list below
---      are ignored without Fly/Ride.
---   3) Any potion variant is counted normally.
--- Our-side rules:
---   Common/custom-junk pets are still counted and can be selected by
---   the optimizer so the account can get rid of them faster.
+-- Incoming-side rules use only the owner's exact name lists.
+-- Listed pets need Fly OR Ride in every regular/Neon/Mega variant.
+-- Unlisted pets are counted normally, regardless of rarity or evolution.
+-- An excluded incoming item has zero value/credit; other items still count.
+-- These incoming lists never filter our inventory or our offered items.
+
 local CommonPetFilter = {}
 
 do
@@ -1623,8 +1621,8 @@ do
         ["pinkypillar"] = true,
     }
 
-    -- Extra pets the user does not want to receive as plain NP.
-    -- Keep aliases for likely spelling variants so matching stays robust.
+    -- Existing own-side minimum exemptions. Keep separate from the
+    -- explicit incoming list so changing that list never affects our side.
     local customUnwantedNames = {
         ["cat"] = true,
         ["tegu"] = true,
@@ -1652,19 +1650,220 @@ do
         ["clumpty"] = true,
     }
 
-    -- Ignore these eggs only on THEIR side; OUR copies still count normally.
-    local ignoredIncomingEggNames = {
-        ["cracked egg"]=true, ["basic egg"]=true, ["pet egg"]=true, ["fairytale egg"]=true,
-        ["endangered egg"]=true, ["retired egg"]=true, ["throwback egg"]=true, ["royal egg"]=true,
-        ["aztec egg"]=true, ["admin abuse egg"]=true, ["crystal egg"]=true, ["moon egg"]=true,
-        ["garden egg"]=true,
+    -- Owner-confirmed incoming pet list, checked against AMVGG on 2026-10-13.
+    -- Exact normalized names only: Cat never matches Kitty Bat, and
+    -- Cocoadile never matches Crocodile.
+    local minimumPotionIncomingNames = {
+        ["Cat"] = true,
+        ["Buffalo"] = true,
+        ["Dog"] = true,
+        ["Snow Cat"] = true,
+        ["Fennec Fox"] = true,
+        ["Rabbit"] = true,
+        ["Puma"] = true,
+        ["Poodle"] = true,
+        ["Mahi Mahi"] = true,
+        ["Mouse"] = true,
+        ["Otter"] = true,
+        ["Snow Puma"] = true,
+        ["Camel"] = true,
+        ["Parakeet"] = true,
+        ["Ant"] = true,
+        ["Granny Wolf"] = true,
+        ["Clumpty"] = true,
+        ["Princess Mare"] = true,
+        ["Budgie Witch"] = true,
+        ["Pinkypillar"] = true,
+        ["Ms. Muffet"] = true,
+        ["2026 Birthday Butterfly"] = true,
+        ["Violet Friend"] = true,
+        ["Sunflower Friend"] = true,
+        ["Chestnut Glyptodon"] = true,
+        ["Ruddy Duck"] = true,
+        ["Forest Sprite"] = true,
+        ["Oakee Knight"] = true,
+        ["Oakee"] = true,
+        ["Stygian Owl"] = true,
+        ["Irish Setter"] = true,
+        ["River Otter"] = true,
+        ["Rainbow Trout"] = true,
+        ["Clubtail Dragonfly"] = true,
+        ["Sheepdog Ducky"] = true,
+        ["Pilot Gull"] = true,
+        ["Gecko Ducky"] = true,
+        ["Nurse Shark"] = true,
+        ["Red Panda Ducky"] = true,
+        ["Bison"] = true,
+        ["Unicorn Ducky"] = true,
+        ["Glyptodon Ducky"] = true,
+        ["Rubber Ducky"] = true,
+        ["White Choccybunny"] = true,
+        ["Milk Choccybunny"] = true,
+        ["Jiggly Jerboa"] = true,
+        ["Gummy Guana"] = true,
+        ["Black Tiger"] = true,
+        ["Mexican Wolf"] = true,
+        ["Black Rhino"] = true,
+        ["Kakapo"] = true,
+        ["Galapagos Sea Lion"] = true,
+        ["California Condor"] = true,
+        ["Fire Foal"] = true,
+        ["Magpie"] = true,
+        ["Sneak Weasel"] = true,
+        ["Japanese Snow Fairy"] = true,
+        ["Angus Cow"] = true,
+        ["Humbug"] = true,
+        ["Shih Tzu"] = true,
+        ["Aye Aye"] = true,
+        ["Tegu"] = true,
+        ["Abyssinian Cat"] = true,
+        ["Ocelot"] = true,
+        ["Beaver"] = true,
+        ["Bunny"] = true,
+        ["Gold Mahi Mahi"] = true,
+        ["Zebra"] = true,
+        ["Tree Frog"] = true,
+        ["Donkey"] = true,
+        ["Muskrat"] = true,
+        ["Chocolate Labrador"] = true,
+        ["Orangutan"] = true,
+        ["Ribbon Seal"] = true,
+        ["Grinmoire"] = true,
+        ["Bolt"] = true,
+        ["Jacobin Pigeon"] = true,
+        ["Blue Cat"] = true,
+        ["Pink Dog"] = true,
+        ["Little Lamb"] = true,
+        ["Crimson Cape"] = true,
+        ["Gumball Caterpillar"] = true,
+        ["Pangolin"] = true,
+        ["Tree Sasquatch"] = true,
+        ["Patchy Bear"] = true,
+        ["Water Opossum"] = true,
+        ["Red Panda"] = true,
+        ["Robot"] = true,
+        ["Blue Butterfly"] = true,
+        ["Shiba Inu"] = true,
+        ["Flying Fish"] = true,
+        ["Corgi"] = true,
+        ["Chanekeh"] = true,
+        ["Swordfish"] = true,
+        ["Badger"] = true,
+        ["Caramelgeist"] = true,
+        ["Mummy Spider"] = true,
+        ["Jumpscare"] = true,
+        ["Samoyed"] = true,
+        ["Angus Calf"] = true,
+        ["Turtle Doves"] = true,
+        ["Jumping Spider"] = true,
+        ["2025 Birthday Butterfly"] = true,
+        ["Onza"] = true,
+        ["Snorgle"] = true,
+        ["Borhyaena Gigantica"] = true,
+        ["Piranha"] = true,
+        ["Halloween Black Mummy Cat"] = true,
+        ["Toucan"] = true,
+        ["Beluga Whale"] = true,
+        ["Orca"] = true,
+        ["Ehecatl"] = true,
+        ["Icy Porcupine"] = true,
+        ["Ratatoskr"] = true,
+        ["Gibbon"] = true,
+        ["Wren"] = true,
+        ["Frozen Penguin"] = true,
+        ["Bali Starling"] = true,
+        ["Angler Fish"] = true,
+        ["Ginger Cat"] = true,
+        ["Sandfish"] = true,
+        ["Lunar Tiger"] = true,
+        ["Bakeneko"] = true,
+        ["Snowy Mammoth"] = true,
+        ["Frankenfeline"] = true,
+        ["Sado Mole"] = true,
+        ["Starfish"] = true,
+        ["Bullfrog"] = true,
+        ["Bluebottle Fly"] = true,
+        ["Island Tarsier"] = true,
+        ["Amber Butterfly"] = true,
+        ["Hopbop"] = true,
+        ["Maleo Bird"] = true,
+        ["Stingray"] = true,
+        ["Pomeranian"] = true,
+        ["Garden Snake"] = true,
+        ["Armadillo"] = true,
+        ["Capuchin Monkey"] = true,
+        ["Kid Goat"] = true,
+        ["Bandicoot"] = true,
+        ["Ox"] = true,
+        ["Mosquito"] = true,
+        ["Waffle Wyrm"] = true,
+        ["Ground Sloth"] = true,
+        ["Mole"] = true,
+        ["Ghost Wolf"] = true,
+        ["Velociraptor"] = true,
+        ["Tawny Frogmouth"] = true,
+        ["Angelfish"] = true,
+        ["Wolpertinger"] = true,
+        ["Black Marlin"] = true,
+        ["Tasmanian Tiger"] = true,
+        ["Black Moon Bear"] = true,
+        ["Brachiosaurus"] = true,
+        ["Shetland Pony Dark Brown"] = true,
+        ["Dingo"] = true,
+        ["Sea Skeleton Panda"] = true,
+        ["Birthday Butterfly 2024"] = true,
+        ["Kaijunior"] = true,
+        ["Red Cardinal"] = true,
+        ["Crab"] = true,
+        ["Rat"] = true,
+        ["Gila Monster"] = true,
+        ["Persian Cat"] = true,
+        ["Rattlesnake"] = true,
+        ["Classic Teapot"] = true,
+        ["Kelp Crewmate"] = true,
+        ["Halloween Blue Scorpion"] = true,
+        ["Hammerhead Shark"] = true,
+        ["Moonpine"] = true,
+        ["Emperor Shrimp"] = true,
+        ["Zeopod"] = true,
+        ["Yellow-Lipped Sea Krait"] = true,
+        ["Show Pony"] = true,
+        ["Bobageist"] = true,
+        ["Banded Palm Civet"] = true,
+        ["Ghost"] = true,
+        ["Gorilla"] = true,
+        ["Bat"] = true,
+        ["Rodeo Bull"] = true,
+        ["Dotted Eggy"] = true,
+        ["Rhino Beetle"] = true,
+        ["Fossa"] = true,
+        ["Lionfish"] = true,
+        ["Robin"] = true,
+        ["Kirin"] = true,
+        ["Blue Jay"] = true,
+        ["Lunar Ox"] = true,
+        ["Bee"] = true,
+        ["Black-Footed Ferret"] = true,
+        ["Cocoadile"] = true,
     }
 
-    -- Match the same normalized names used by the filter lookups.
-    for _, names in ipairs({commonNames, customUnwantedNames, ignoredIncomingEggNames}) do
-        for name, enabled in pairs(table.clone(names)) do
-            names[normalize(name)] = enabled
-        end
+    -- Exactly the 11 eggs requested; our eggs continue to count normally.
+    local ignoredIncomingEggNames = {
+        ["Cracked Egg"] = true,
+        ["Basic Egg"] = true,
+        ["Throwback Egg"] = true,
+        ["Pet Egg"] = true,
+        ["Fairytale Egg"] = true,
+        ["Endangered Egg"] = true,
+        ["Retired Egg"] = true,
+        ["Royal Egg"] = true,
+        ["Aztec Egg"] = true,
+        ["Admin Abuse Egg"] = true,
+        ["Crystal Egg"] = true,
+    }
+
+    for _, names in ipairs({commonNames, customUnwantedNames, minimumPotionIncomingNames, ignoredIncomingEggNames}) do
+        for name, enabled in pairs(table.clone(names)) do names[normalize(name)] = enabled end
     end
 
     local function rarityText(value)
@@ -1723,36 +1922,32 @@ do
             or p.rideable == true
     end
 
+    -- Use exactly the spelling aliases already supported by price lookup.
+    -- aliases() preserves meaningful parenthetical qualifiers and never
+    -- turns Cat into Kitty Bat or Cocoadile into Crocodile.
+    local function incomingNameMatches(names, item)
+        for name in pairs(aliases(getItemName(item))) do
+            if names[name] == true then return true end
+        end
+        return false
+    end
+
     function CommonPetFilter.isIgnoredIncomingEgg(item)
         return type(item) == "table"
-            and ignoredIncomingEggNames[normalize(getItemName(item))] == true
+            and (item.category == "pets" or item.category == "eggs")
+            and incomingNameMatches(ignoredIncomingEggNames, item)
+    end
+
+    function CommonPetFilter.requiresIncomingPotion(item)
+        return type(item) == "table"
+            and item.category == "pets"
+            and incomingNameMatches(minimumPotionIncomingNames, item)
     end
 
     function CommonPetFilter.shouldIgnoreIncoming(item)
-        if
-            type(item) ~= "table"
-            or tostring(item.category or "") ~= "pets"
-            or CommonPetFilter.hasPotion(item)
-        then
-            return false, nil
+        if CommonPetFilter.requiresIncomingPotion(item) and not CommonPetFilter.hasPotion(item) then
+            return true, "LISTED PET NEEDS F/R"
         end
-
-        local variant =
-            getVariant(item)
-
-        -- Global rule: plain Neon/Mega without potion is worthless to us.
-        if variant == "N" or variant == "M" then
-            return true, "PLAIN " .. variant .. " NO F/R"
-        end
-
-        -- Plain NP is ignored only for Common/custom junk names.
-        if
-            variant == "NP"
-            and CommonPetFilter.isBaseUnwanted(item)
-        then
-            return true, "UNWANTED NP NO F/R"
-        end
-
         return false, nil
     end
 
@@ -2948,32 +3143,40 @@ function Runtime.categoryPriceReady(slug)
     return state~=nil and state.ready==true and state.stale~=true
 end
 
+function Runtime.offerPriceCategories(mine, theirs)
+    local slugs = {}
+    for side, offer in ipairs({mine or {}, theirs or {}}) do
+        local raw = type(offer.items) == "table" and offer.items
+            or type(offer.offer_items) == "table" and offer.offer_items or {}
+        for _, rawItem in pairs(raw) do
+            -- Resolve identity just as getOfferItems() does for valuation.
+            -- Do not modify the original ClientData item.
+            local item = Runtime.resolveItem(rawItem)
+            -- An excluded incoming item contributes no value or credit and
+            -- therefore needs no price catalog. Our side always needs prices.
+            if side == 2 and Runtime.incomingItemIgnoreReason(item) then continue end
+            local entry, slug = findAMVGG(item)
+            if entry and slug then slugs[slug] = true end
+        end
+    end
+    return slugs
+end
+
 function Runtime.offerPricesReady(mine, theirs)
     if not AMVGG.ready or AMVGG.dataStale then return false end
-    for _,offer in ipairs({mine or {},theirs or {}}) do
-        local raw=type(offer.items)=="table" and offer.items or type(offer.offer_items)=="table" and offer.offer_items or {}
-        for _,item in pairs(raw) do
-            local entry,slug=findAMVGG(item)
-            if entry and not Runtime.categoryPriceReady(slug) then return false end
-        end
+    for slug in pairs(Runtime.offerPriceCategories(mine, theirs)) do
+        if not Runtime.categoryPriceReady(slug) then return false end
     end
     return true
 end
 
 function Runtime.offerPriceSignature(mine, theirs)
     if not AMVGG.categoryState then return tostring(AMVGG.version) end
-    local slugs={}
-    for _,offer in ipairs({mine or {},theirs or {}}) do
-        local raw=type(offer.items)=="table" and offer.items or type(offer.offer_items)=="table" and offer.offer_items or {}
-        for _,item in pairs(raw) do
-            local _,slug=findAMVGG(item)
-            if slug then slugs[slug]=true end
-        end
-    end
-    local keys={} for slug in pairs(slugs) do keys[#keys+1]=slug end table.sort(keys)
-    local result={}
-    for _,slug in ipairs(keys) do result[#result+1]=slug..":"..tostring((AMVGG.categoryState[slug] or {}).version or 0) end
-    return table.concat(result,"|")
+    local slugs = Runtime.offerPriceCategories(mine, theirs)
+    local keys = {} for slug in pairs(slugs) do keys[#keys+1] = slug end table.sort(keys)
+    local result = {}
+    for _, slug in ipairs(keys) do result[#result+1] = slug..":"..tostring((AMVGG.categoryState[slug] or {}).version or 0) end
+    return table.concat(result, "|")
 end
 
 local function analyzeItem(item)
@@ -3280,8 +3483,8 @@ local Settings = {
     blockEstimated =
         true,
 
-    -- Incoming-side junk filter. Potion variants still count.
-    -- Also ignores every plain Neon/Mega (N/M) from the other player.
+    -- Only listed incoming pets without Fly/Ride are excluded.
+    -- All unlisted pets, including plain Neon/Mega, count normally.
     excludeUnwantedIncomingNoPotion =
         true,
 }
@@ -3597,7 +3800,7 @@ do
     Runtime.settingsReadFailed = status == "ERROR"
     Runtime.applySavedSettings(saved)
     local pending = Runtime.pendingSettings()
-    if pending and (pending.revision == 50 or pending.revision == 51) then
+    if pending and (pending.revision == 50 or pending.revision == 51 or pending.revision == 52 or pending.revision == 53 or pending.revision == 54 or pending.revision == 55) then
         local edits = pending.overrides or {}
         Runtime.applySavedSettings((pending.needsRecovery or status == "ERROR") and edits or pending.data)
         Runtime.settingsLocalOverrides = shallowCopy(edits)
@@ -3738,6 +3941,7 @@ local AutoTradeGeneration = 0
 local Gui
 
 function Runtime.incomingItemIgnoreReason(item, options)
+    if options and options.demandSide == "mine" then return nil end
     if normalize(getItemName(item)) == normalize("Royal Fairytale Egg") then
         local entry, source = findAMVGG(item)
         if entry and source == "eggs" then return nil end
@@ -3826,7 +4030,7 @@ local function saveSettings(origin)
     ENV.__AM_ANALYZER_SETTINGS_PENDING = ENV.__AM_ANALYZER_SETTINGS_PENDING or {}
     ENV.__AM_ANALYZER_SETTINGS_PENDING[tostring(LocalPlayer.UserId)] = {
         data=shallowCopy(Settings), overrides=shallowCopy(Runtime.settingsLocalOverrides),
-        needsRecovery=unreadable == true, revision=51,
+        needsRecovery=unreadable == true, revision=55,
     }
     local ok, err = Runtime.flushSettings()
     if not ok then Runtime.scheduleSettingsRetry() end
@@ -3885,7 +4089,33 @@ end
 
 
 Runtime.fileSchemas[FIRST_SEEN_FILE] = function(data)
-    return type(data.items) == "table" and type(data.initialized) == "boolean"
+    if type(data.items) ~= "table" or type(data.initialized) ~= "boolean" then return false end
+    if data.baselines ~= nil then
+        if type(data.baselines) ~= "table" then return false end
+        local count = 0
+        for source, established in pairs(data.baselines) do
+            count += 1
+            if count > 32 or type(source) ~= "string" or #source > 40
+                or not source:match("^[a-z][a-z0-9_]*$") or type(established) ~= "boolean" then return false end
+        end
+    end
+    return true
+end
+
+function Runtime.historyBaselines(history)
+    if type(history.baselines) == "table" then return history.baselines end
+    local baselines = {}
+    -- Migrate legacy history by the catalogs actually represented in it.
+    -- Missing catalogs are not treated as previously baselined merely
+    -- because the old global initialized flag was set by another catalog.
+    if history.initialized == true then
+        for id in pairs(history.items or {}) do
+            local source = type(id) == "string" and id:match("^([a-z][a-z0-9_]*):")
+            if source then baselines[source] = true end
+        end
+    end
+    history.baselines = baselines
+    return baselines
 end
 local FirstSeen = nil
 do
@@ -3907,6 +4137,17 @@ if type(FirstSeen.items) ~= "table" then
     Runtime.storageIssue(FIRST_SEEN_FILE, "INVALID HISTORY SCHEMA")
 end
 
+local function initializeHistoryBaselines()
+    local migrate = FirstSeen.initialized == true and FirstSeen.baselines == nil
+    Runtime.historyBaselines(FirstSeen)
+    if migrate and not Runtime.firstSeenReadFailed then
+        Runtime.firstSeenDirty = true
+        Runtime.firstSeenDurable = false
+        Runtime.historyRevision = (Runtime.historyRevision or 0) + 1
+    end
+end
+initializeHistoryBaselines()
+
 function Runtime.scheduleHistoryRetry()
     if not Runtime.alive() or not Runtime.firstSeenDirty or Runtime.historyRetryScheduled then return end
     if type(Runtime.task.delay) ~= "function" then return end
@@ -3926,7 +4167,7 @@ function Runtime.persistFirstSeen()
     if Runtime.historyWriter then Runtime.scheduleHistoryRetry() return false end
     Runtime.historyWriter=true
     local revision=Runtime.historyRevision or 0
-    local snapshot={initialized=FirstSeen.initialized,items=table.clone(FirstSeen.items)}
+    local snapshot={initialized=FirstSeen.initialized,items=table.clone(FirstSeen.items),baselines=table.clone(Runtime.historyBaselines(FirstSeen))}
     local called,saved=pcall(saveJSON,FIRST_SEEN_FILE,snapshot)
     Runtime.historyWriter=nil
     local current=revision==(Runtime.historyRevision or 0)
@@ -3959,7 +4200,7 @@ function Runtime.configurationReady()
     if pending then
         ENV.__AM_ANALYZER_SETTINGS_PENDING[tostring(LocalPlayer.UserId)] = {
             data=shallowCopy(Settings), overrides=shallowCopy(Runtime.settingsLocalOverrides),
-            needsRecovery=false, revision=51,
+            needsRecovery=false, revision=55,
         }
     end
     Runtime.settingsBaseline()
@@ -3984,9 +4225,14 @@ function Runtime.storageReady(forHistoryUpdate)
                 local previous=merged[id]
                 if type(value)=="number" then merged[id]=type(previous)=="number" and math.max(previous,value) or value end
             end
-            FirstSeen={initialized=true,items=merged}
+            local baselines = table.clone(Runtime.historyBaselines(saved))
+            for source, established in pairs(Runtime.historyBaselines(FirstSeen)) do
+                if established then baselines[source] = true end
+            end
+            FirstSeen={initialized=true,items=merged,baselines=baselines}
             Runtime.historyRevision=(Runtime.historyRevision or 0)+1
         else FirstSeen=saved end
+        initializeHistoryBaselines()
         Runtime.firstSeenReadFailed=false
         Runtime.firstSeenDurable=not Runtime.firstSeenDirty
         Runtime.newPolicyEpoch=(Runtime.newPolicyEpoch or 0)+1
@@ -4026,6 +4272,24 @@ local function entryID(
 end
 
 
+-- Older histories use entry.id (e.g. "101") without a source prefix.
+-- Establish a previously seen source by matching its actual history keys to
+-- a fresh catalog, even if an earlier startup already saved empty baselines.
+-- Merely having an initialized global history does not baseline other sources.
+function Runtime.inferHistoryBaseline(history, source, database)
+    local baselines = Runtime.historyBaselines(history)
+    if baselines[source] == true then return true, false end
+    if history.initialized == true and type(database) == "table" and Runtime.categoryPriceReady(source) then
+        for key, entry in pairs(database) do
+            if history.items[entryID(source, key, entry)] ~= nil then
+                baselines[source] = true
+                return true, true
+            end
+        end
+    end
+    return false, false
+end
+
 function Runtime.firstSeenTimestamp(value, now)
     if type(value) ~= "number" or not num(value) or value < 0 or value > now + 60 then return nil end
     return value > now and now or value
@@ -4040,20 +4304,10 @@ function Runtime.repairFirstSeen(id, value)
 end
 
 local function updateFirstSeen()
-
-    if not Runtime.storageReady(true) then return end
-    if not AMVGG.ready then
-        return
-    end
-
-    local baseline =
-        FirstSeen.initialized
-        ~= true
-
-    local now =
-        os.time()
-
-    local changed = false
+    if not Runtime.storageReady(true) or not AMVGG.ready then return end
+    local now = os.time()
+    local changed, visited = false, false
+    local baselines = Runtime.historyBaselines(FirstSeen)
     for id, value in pairs(FirstSeen.items) do
         local valid = Runtime.firstSeenTimestamp(value, now)
         if valid == nil or valid ~= value then
@@ -4061,69 +4315,35 @@ local function updateFirstSeen()
             changed = true
         end
     end
-
-    for source,
-        database in pairs(
-            AMVGG.categories
-        )
-    do
-
-        if type(database) == "table" then
-
-            for key,
-                entry in pairs(
-                    database
-                )
-            do
-
-                local id =
-                    entryID(
-                        source,
-                        key,
-                        entry
-                    )
-
-                if
-                    FirstSeen.items[
-                        id
-                    ]
-                    == nil
-                then
-
-                    if baseline then
-
-                        FirstSeen.items[id] =
-                            0
-
-                    else
-
-                        FirstSeen.items[id] =
-                            now
-                    end
-
-                    changed =
-                        true
+    for source, database in pairs(AMVGG.categories) do
+        -- Only a successfully verified, fresh catalog establishes its baseline.
+        if type(database) == "table" and Runtime.categoryPriceReady(source) then
+            visited = true
+            local established, migrated = Runtime.inferHistoryBaseline(FirstSeen, source, database)
+            if migrated then changed = true end
+            local baseline = not established
+            for key, entry in pairs(database) do
+                local id = entryID(source, key, entry)
+                if FirstSeen.items[id] == nil then
+                    FirstSeen.items[id] = baseline and 0 or now
+                    changed = true
                 end
             end
+            if baseline then baselines[source] = true changed = true end
         end
     end
-
-    if baseline then
-
-        FirstSeen.initialized =
-            true
-
-        changed =
-            true
+    if visited and FirstSeen.initialized ~= true then
+        FirstSeen.initialized = true
+        changed = true
     end
-
     if changed then
-        Runtime.firstSeenDirty=true
-        Runtime.historyRevision=(Runtime.historyRevision or 0)+1
+        Runtime.firstSeenDirty = true
+        Runtime.historyRevision = (Runtime.historyRevision or 0) + 1
+        Runtime.newPolicyEpoch = (Runtime.newPolicyEpoch or 0) + 1
+        Runtime.nextNewExpiry = nil
     end
     if Runtime.firstSeenDirty then Runtime.persistFirstSeen() end
 end
-
 
 function Runtime.newPolicySignature()
     local now = os.time()
@@ -4142,10 +4362,19 @@ local function isNewEntry(source, entry)
     local id = entryID(source, normalize(entry.name or ""), entry)
     local now = os.time()
     local stored = FirstSeen.items[id]
-    if stored == nil and FirstSeen.initialized ~= true then return false, 0 end
+    if stored == nil then
+        local established, migrated = Runtime.inferHistoryBaseline(FirstSeen, source, AMVGG.categories[source])
+        if migrated then
+            Runtime.firstSeenDirty = true
+            Runtime.historyRevision = (Runtime.historyRevision or 0) + 1
+            Runtime.newPolicyEpoch = (Runtime.newPolicyEpoch or 0) + 1
+            Runtime.nextNewExpiry = nil
+        end
+        if not established then return false, 0 end
+    end
     local seen = Runtime.firstSeenTimestamp(stored, now)
     if seen == nil or seen ~= stored then
-        seen = stored == nil and FirstSeen.initialized ~= true and 0 or (seen or now)
+        seen = seen or now
         Runtime.repairFirstSeen(id, seen)
     end
     if seen == 0 then return false, 0 end
@@ -4537,7 +4766,88 @@ function Runtime.tradeKey(trade, partner)
     return string.format("%q:%q", id, Runtime.partnerKey(partner))
 end
 
+-- Only small, synchronous reads belong in the final dispatch check. Catalog
+-- searches may yield and must finish before entering this check. If a data
+-- provider unexpectedly yields here, discard the check instead of resuming it
+-- with an old trade and sending an unsafe command.
+function Runtime.atomicCheck(check)
+    local thread = coroutine.create(check)
+    local result = table.pack(coroutine.resume(thread))
+    if coroutine.status(thread) ~= "dead" then
+        if type(Runtime.task.cancel) == "function" then pcall(Runtime.task.cancel, thread)
+        elseif type(coroutine.close) == "function" then pcall(coroutine.close, thread) end
+        if Runtime.jobs then Runtime.jobs[thread] = nil end
+        return nil, "CONTEXT CHECK YIELDED"
+    end
+    if not result[1] then return nil, "CONTEXT CHECK FAILED" end
+    return table.unpack(result, 2, result.n)
+end
+
+function Runtime.priceStateSignature()
+    local values = {tostring(AMVGG.version), tostring(AMVGG.ready),
+        tostring(AMVGG.loading), tostring(AMVGG.dataStale), tostring(AMVGG.categories)}
+    local keys = {}
+    for slug in pairs(AMVGG.categoryState or {}) do keys[#keys + 1] = slug end
+    table.sort(keys)
+    for _, slug in ipairs(keys) do
+        local state = AMVGG.categoryState[slug]
+        values[#values + 1] = table.concat({slug, tostring(state.version),
+            tostring(state.ready), tostring(state.stale), tostring((AMVGG.categories or {})[slug])}, ":")
+    end
+    return table.concat(values, "|")
+end
+
+-- No error handler or cancellation RPC is called from this final read.
+-- The ordinary getTrade() path handles read errors on the next controller tick.
+function Runtime.readDispatchTrade()
+    for _, key in ipairs({"trade", "trading"}) do
+        local ok, trade = pcall(ClientData.get, key)
+        if ok and type(trade) == "table"
+            and (trade.sender or trade.recipient or trade.sender_offer or trade.recipient_offer) then return trade end
+    end
+    return nil
+end
+
+-- Run only inside atomicCheck(). This does not search any price catalog.
+function Runtime.fastContext(context, checkMine, checkPrices, priceStamp)
+    if not context then return nil, "TRADE_CHANGED" end
+    if not Runtime.alive() or not Gui.Parent then return nil, "GUI_CLOSED" end
+    if AutoTradeGeneration ~= context.generation or Settings.autoTrade ~= context.auto then return nil, "AUTO_DISABLED" end
+    local live = Runtime.readDispatchTrade()
+    local mine, theirs, _, partner = getTradeSides(live)
+    if not mine or not theirs or Runtime.tradeKey(live, partner) ~= context.key then return nil, "TRADE_CHANGED" end
+    if offerSignature(theirs) ~= context.theirs then return nil, "THEIR_CHANGED" end
+    if checkMine and offerSignature(mine) ~= context.mine then return nil, "OUR_CHANGED" end
+    if checkPrices then
+        if Runtime.offerValuationSignature(theirs) ~= context.valuationTheirs then return nil, "THEIR_METADATA_CHANGED" end
+        if checkMine and Runtime.offerValuationSignature(mine) ~= context.valuationMine then return nil, "OUR_METADATA_CHANGED" end
+        if Runtime.policySignature() ~= context.policy then return nil, "POLICY_CHANGED" end
+        if Runtime.newPolicySignature() ~= context.newPolicy then return nil, "NEW_POLICY_CHANGED" end
+        if Runtime.priceStateSignature() ~= priceStamp then return nil, "PRICES_CHANGED" end
+    end
+    -- Also catch a provider synchronously changing automation during its read.
+    if not Runtime.alive() or not Gui.Parent then return nil, "GUI_CLOSED" end
+    if AutoTradeGeneration ~= context.generation or Settings.autoTrade ~= context.auto then return nil, "AUTO_DISABLED" end
+    return live, nil, mine, theirs, priceStamp
+end
+
+function Runtime.dispatchStorageReady()
+    -- storageReady() may recover or write files. Its preparation already ran;
+    -- the final gate only checks flags and never starts a filesystem operation.
+    return not Runtime.settingsReadFailed and not Runtime.fileReadBlocked[SETTINGS_FILE]
+        and not Runtime.firstSeenReadFailed and not Runtime.fileReadBlocked[FIRST_SEEN_FILE]
+        and ((num(Settings.newItemHours) or 24) <= 0 or Runtime.firstSeenDurable ~= false)
+end
+
+function Runtime.mutationAllowed(live, mine)
+    if not mine or Runtime.tradeInConfirmation(live)
+        or mine.accepted == true or mine.negotiated == true or mine.is_accepted == true then return false end
+    return not Runtime.acceptanceInFlight or not Runtime.acceptanceInFlight(live)
+end
+
 function Runtime.captureTrade(trade)
+    local generation, auto = AutoTradeGeneration, Settings.autoTrade
+    local priceStamp = Runtime.priceStateSignature()
     local live = getTrade()
     local mine, theirs, _, partner = getTradeSides(live)
     local suppliedMine, suppliedTheirs, _, suppliedPartner = getTradeSides(trade)
@@ -4545,18 +4855,21 @@ function Runtime.captureTrade(trade)
         or not Runtime.tradeID(live) or not Runtime.tradeID(trade)
         or Runtime.tradeKey(live, partner) ~= Runtime.tradeKey(trade, suppliedPartner)
         or fullSignature(mine, theirs) ~= fullSignature(suppliedMine, suppliedTheirs) then return nil end
-    return {
-        key = Runtime.tradeKey(live, partner), generation = AutoTradeGeneration, auto = Settings.autoTrade,
+    local context = {
+        key = Runtime.tradeKey(live, partner), generation = generation, auto = auto,
         prices = AMVGG.version, priceSignature = Runtime.offerPriceSignature(mine,theirs), policy = Runtime.policySignature(), newPolicy = Runtime.newPolicySignature(),
         mine = offerSignature(mine), theirs = offerSignature(theirs),
         valuationMine = Runtime.offerValuationSignature(mine), valuationTheirs = Runtime.offerValuationSignature(theirs),
     }
+    if not Runtime.atomicCheck(function() return Runtime.fastContext(context, true, true, priceStamp) end) then return nil end
+    return context
 end
 
 function Runtime.liveContext(context, checkMine, checkPrices)
     if not context then return nil, "TRADE_CHANGED" end
     if not Runtime.alive() or not Gui.Parent then return nil, "GUI_CLOSED" end
     if AutoTradeGeneration ~= context.generation or Settings.autoTrade ~= context.auto then return nil, "AUTO_DISABLED" end
+    local priceStamp = checkPrices and Runtime.priceStateSignature() or nil
     local live = getTrade()
     local mine, theirs, _, partner = getTradeSides(live)
     if not mine or not theirs or Runtime.tradeKey(live, partner) ~= context.key then return nil, "TRADE_CHANGED" end
@@ -4571,7 +4884,7 @@ function Runtime.liveContext(context, checkMine, checkPrices)
         if Runtime.newPolicySignature() ~= context.newPolicy then return nil, "NEW_POLICY_CHANGED" end
         if Runtime.policySignature() ~= context.policy then return nil, "POLICY_CHANGED" end
     end
-    return live, nil, mine, theirs
+    return Runtime.atomicCheck(function() return Runtime.fastContext(context, checkMine, checkPrices, priceStamp) end)
 end
 
 function Runtime.optimizationKey(theirOffer)
@@ -5096,69 +5409,104 @@ local function remoteCall(remote, ...)
 end
 
 function Runtime.invokeRemote(remote, expected, ...)
+    local generation = AutoTradeGeneration
     if not remote then return false, "REMOTE MISSING" end
     if Runtime.remoteEndpointUsable and not Runtime.remoteEndpointUsable(remote) then
         Runtime.invalidateTradeRemote(remote)
         return false, "REMOTE ENDPOINT UNAVAILABLE"
     end
-    local function expectedCurrent()
-        if Runtime.acceptanceInFlight and (remote==rawget(TradeRemote,"Add") or remote==rawget(TradeRemote,"Remove"))
-            and Runtime.acceptanceInFlight(getTrade()) then return false end
+    local accepting = remote == rawget(TradeRemote, "Accept")
+    local mutation = remote == rawget(TradeRemote, "Add") or remote == rawget(TradeRemote, "Remove")
+    -- A legacy caller must not leave Add/Remove unbound to a trade.
+    if mutation and not expected then
+        if Settings.autoTrade ~= true then return false, "REMOTE CANCELLED" end
+        expected = {context=Runtime.captureTrade(getTrade()), confirmation=false, prices=false}
+        if not expected.context then return false, "REMOTE CANCELLED" end
+    end
+    local function expectedCurrent(observeAcceptAdvance)
+        if not Runtime.alive() or generation ~= AutoTradeGeneration then return false end
         if not expected then return true end
         if expected.idle then return expected.idle() == true end
-        if not Settings.autoTrade or expected.context.auto ~= true then return false end
+        if not expected.context or not Settings.autoTrade or expected.context.auto ~= true then return false end
         if expected.prices ~= false and not Runtime.storageReady() then return false end
-        local live, _, mine = Runtime.liveContext(expected.context, expected.mine ~= false, expected.prices ~= false)
+        local live, _, mine, _, priceStamp = Runtime.liveContext(expected.context, expected.mine ~= false, expected.prices ~= false)
         if not live then return false end
-        if expected.confirmation ~= nil and Runtime.tradeInConfirmation(live) ~= expected.confirmation then return false end
-        return not expected.proof or Runtime.ownProofCurrent(expected.proof, mine)
+        if mutation and not Runtime.mutationAllowed(live, mine) then return false end
+        if expected.confirmation ~= nil and Runtime.tradeInConfirmation(live) ~= expected.confirmation then
+            -- Only observation after this Accept was dispatched may advance
+            -- from negotiation to confirmation. The send gate below still
+            -- requires negotiation; changed trades/offers/prices/proof fail.
+            local naturalAdvance = observeAcceptAdvance == true
+                and accepting and expected.confirmation == false
+                and Runtime.tradeInConfirmation(live)
+            if not naturalAdvance then return false end
+        end
+        if expected.proof and not Runtime.ownProofCurrent(expected.proof, mine) then return false end
+        return true, priceStamp
     end
     if not expectedCurrent() then return false, "REMOTE CANCELLED" end
     Runtime.remoteCalls = Runtime.remoteCalls or {}
     local previous = Runtime.remoteCalls[remote]
-    if previous and not previous.done and os.clock() < previous.expires then
-        return false, "REMOTE BUSY"
-    end
+    if previous and not previous.done and os.clock() < previous.expires then return false, "REMOTE BUSY" end
     local args = table.pack(...)
-    local generation = AutoTradeGeneration
-    local before = Runtime.captureTrade(getTrade())
+    local before = expected and expected.context or Runtime.captureTrade(getTrade())
     local operation = {done = false, abandoned = false, expires = os.clock() + 30}
     Runtime.remoteCalls[remote] = operation
     local function invoke()
-        if not expectedCurrent() then operation.done=true operation.result=table.pack(false,"REMOTE CANCELLED") return end
+        -- Resolve the callable before the final gate; a lazy endpoint getter
+        -- must never introduce an unchecked wait between validation and send.
+        local endpoint, receiver, event
+        if typeof(remote) == "Instance" then
+            receiver = remote
+            if remote:IsA("RemoteEvent") then endpoint, event = remote.FireServer, true
+            elseif remote:IsA("RemoteFunction") then endpoint = remote.InvokeServer end
+        elseif type(remote) == "function" then endpoint = remote
+        elseif type(remote) == "table" then
+            receiver = remote
+            if type(remote.FireServer) == "function" then endpoint = remote.FireServer
+            elseif type(remote.InvokeServer) == "function" then endpoint = remote.InvokeServer end
+        end
+        local valid, priceStamp = expectedCurrent()
+        local allowed = valid and Runtime.atomicCheck(function()
+            if operation.abandoned or not Runtime.alive() or generation ~= AutoTradeGeneration then return false end
+            if expected then
+                if expected.idle then
+                    if expected.idle() ~= true then return false end
+                else
+                    local live, _, mine = Runtime.fastContext(expected.context, expected.mine ~= false, expected.prices ~= false, priceStamp)
+                    if not live or Settings.autoTrade ~= true then return false end
+                    if expected.prices ~= false and not Runtime.dispatchStorageReady() then return false end
+                    if mutation and not Runtime.mutationAllowed(live, mine) then return false end
+                    if expected.confirmation ~= nil and Runtime.tradeInConfirmation(live) ~= expected.confirmation then return false end
+                    if expected.proof and not Runtime.ownProofCurrent(expected.proof, mine) then return false end
+                    if not Runtime.fastContext(expected.context, expected.mine ~= false, expected.prices ~= false, priceStamp) then return false end
+                end
+            elseif before and not Runtime.fastContext(before, false, false) then return false end
+            return Runtime.alive() and generation == AutoTradeGeneration
+        end)
+        if not allowed then
+            operation.done = true
+            operation.result = table.pack(false, "REMOTE CANCELLED")
+            if Runtime.remoteCalls[remote] == operation then Runtime.remoteCalls[remote] = nil end
+            return
+        end
+        operation.started = true
         if expected and expected.acceptRecord then expected.acceptRecord.started=true end
         if expected and expected.attemptRecord then expected.attemptRecord.started=true end
         local result = table.pack(pcall(function()
-            if typeof(remote) == "Instance" then
-                if remote:IsA("RemoteEvent") then
-                    remote:FireServer(table.unpack(args, 1, args.n))
-                    return true
-                end
-                if remote:IsA("RemoteFunction") then return remote:InvokeServer(table.unpack(args, 1, args.n)) end
-            elseif type(remote) == "function" then
-                return remote(table.unpack(args, 1, args.n))
-            elseif type(remote) == "table" then
-                if type(remote.FireServer) == "function" then return remote:FireServer(table.unpack(args, 1, args.n)) end
-                if type(remote.InvokeServer) == "function" then return remote:InvokeServer(table.unpack(args, 1, args.n)) end
-            end
-            error("UNSUPPORTED REMOTE")
+            if type(endpoint) ~= "function" then error("UNSUPPORTED REMOTE") end
+            if event then endpoint(receiver, table.unpack(args, 1, args.n)) return true end
+            if receiver then return endpoint(receiver, table.unpack(args, 1, args.n)) end
+            return endpoint(table.unpack(args, 1, args.n))
         end))
         operation.done = true
-        if result[1] == false and Runtime.staleRemoteFailure and Runtime.staleRemoteFailure(remote, result[2]) then
-            -- Clear only known stale endpoints. TIMEOUT/BUSY/CANCELLED keep their
-            -- uncertainty quarantine and must never cause an automatic resend.
-            Runtime.invalidateTradeRemote(remote)
-        end
+        if result[1] == false and Runtime.staleRemoteFailure and Runtime.staleRemoteFailure(remote, result[2]) then Runtime.invalidateTradeRemote(remote) end
         if not operation.abandoned then operation.result = result end
         if Runtime.remoteCalls[remote] == operation then Runtime.remoteCalls[remote] = nil end
     end
     local thread
-    if type(Runtime.task.spawn) == "function" then
-        thread = Runtime.task.spawn(invoke)
-    else
-        thread = coroutine.create(invoke)
-        coroutine.resume(thread)
-    end
+    if type(Runtime.task.spawn) == "function" then thread = Runtime.task.spawn(invoke)
+    else thread = coroutine.create(invoke) coroutine.resume(thread) end
     local function cancel(reason)
         operation.abandoned = true
         operation.result = nil
@@ -5170,12 +5518,22 @@ function Runtime.invokeRemote(remote, expected, ...)
         return false, reason
     end
     local function current()
-        if not Runtime.alive() or generation ~= AutoTradeGeneration or not expectedCurrent() then return false end
-        if before and before.key then
-            local after = Runtime.captureTrade(getTrade())
-            if not after or after.key ~= before.key then return false end
-        end
-        return true
+        if not Runtime.alive() or generation ~= AutoTradeGeneration then return false end
+        -- Add/Remove are expected to change our offer. The send gate validates
+        -- its original contents, while observation validates the same trade
+        -- and partner offer without rejecting the intended local mutation.
+        if not mutation and not expectedCurrent(operation.started == true) then return false end
+        return Runtime.atomicCheck(function()
+            if not Runtime.alive() or generation ~= AutoTradeGeneration then return false end
+            if mutation and (not Runtime.fastContext(expected.context, false, false)
+                or Settings.autoTrade ~= true) then return false end
+            if before then
+                local live = Runtime.readDispatchTrade()
+                local mine, theirs, _, partner = getTradeSides(live)
+                if not mine or not theirs or Runtime.tradeKey(live, partner) ~= before.key then return false end
+            end
+            return true
+        end) == true
     end
     local deadline = os.clock() + 8
     for _ = 1, 162 do
@@ -5186,6 +5544,8 @@ function Runtime.invokeRemote(remote, expected, ...)
     end
     return cancel("REMOTE TIMEOUT")
 end
+
+
 
 
 --============================================================
@@ -5928,8 +6288,9 @@ local function addOurItem(uid)
 
     if not Runtime.liveContext(context, true, true) then return false, "TRADE_CHANGED" end
     return
-        remoteCall(
+        Runtime.invokeRemote(
             TradeRemote.Add,
+            {context=context, confirmation=false},
             uid
         )
 end
@@ -5941,11 +6302,10 @@ local function removeOurItem(uid)
         return false
     end
 
-    return
-        remoteCall(
-            TradeRemote.Remove,
-            uid
-        )
+    local context = Runtime.captureTrade(getTrade())
+    if not context or context.auto ~= true then return false, "TRADE_CHANGED" end
+    return Runtime.invokeRemote(TradeRemote.Remove,
+        {context=context, confirmation=false, prices=false}, uid)
 end
 
 
@@ -8150,7 +8510,7 @@ local UnwantedIncomingToggle =
 local function renderUnwantedIncoming()
 
     UnwantedIncomingToggle.Text =
-        "IGNORE THEIR N/M + JUNK NP W/O F/R: "
+        "THEIR LISTED PETS NEED F/R: "
         .. (
             Settings.excludeUnwantedIncomingNoPotion
             and "ON"
@@ -10249,8 +10609,8 @@ local function evaluateTrade(
                 -- Listed eggs are worth 0 only on THEIR side.
                 ignoreIncomingEggs = true,
 
-                -- THEIR plain N/M without potion are ignored globally.
-                -- Plain NP is also ignored for Common/custom-junk pets.
+                -- Only owner-listed incoming pets require Fly/Ride.
+                -- Unlisted NP/Neon/Mega pets keep their ordinary Demand credit.
                 ignoreUnwantedIncomingNoPotion =
                     true,
             }
@@ -11411,7 +11771,7 @@ local function manageAutoTrade(trade)
     then
 
         testLog(
-            "THEIR JUNK FILTER",
+            "THEIR LISTED ITEM FILTER",
             "IGNORED=",
             evaluation.theirs.unwantedIncomingIgnored
         )
